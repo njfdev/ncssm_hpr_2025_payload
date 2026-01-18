@@ -9,5 +9,7 @@ pub mod types;
 pub mod bmp390;
 pub mod lsm6dsox;
 pub mod lis3mdl;
+pub mod calibration;
+pub mod orientation;
 
-pub use types::SensorData;
+pub use types::{SensorData, ImuCalibration, Orientation, LogEntry};

@@ -15,7 +15,7 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{SdCard, VolumeManager, VolumeIdx, Mode, TimeSource, Timestamp};
 use heapless::String;
 
-use crate::sensors::SensorData;
+use crate::sensors::LogEntry;
 
 /// SPI frequency for SD card initialization (required by SD spec)
 const SD_SPI_FREQ_INIT: u32 = 400_000;
@@ -128,7 +128,7 @@ impl SdLogger {
                         .map_err(|_| "Failed to create file")?;
 
                     // Write CSV header with units
-                    file.write(b"time_s,pressure_Pa,temp_C,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,mag_x_uT,mag_y_uT,mag_z_uT\n")
+                    file.write(b"time_s,pressure_Pa,temp_C,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,mag_x_uT,mag_y_uT,mag_z_uT,roll_deg,pitch_deg,yaw_deg,lin_x_g,lin_y_g,lin_z_g\n")
                         .map_err(|_| "Failed to write header")?;
 
                     file.flush().map_err(|_| "Failed to flush")?;
@@ -143,10 +143,10 @@ impl SdLogger {
         Err("No available filenames")
     }
 
-    /// Append a batch of sensor data rows to the file
+    /// Append a batch of log entries to the file
     /// Opens the file once, writes all entries, then closes.
-    /// entries: slice of (time_ms, SensorData) tuples
-    pub fn log_batch(&mut self, filename: &str, entries: &[(u64, SensorData)]) -> Result<(), &'static str> {
+    /// entries: slice of (time_ms, LogEntry) tuples
+    pub fn log_batch(&mut self, filename: &str, entries: &[(u64, LogEntry)]) -> Result<(), &'static str> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -164,19 +164,22 @@ impl SdLogger {
             .map_err(|_| "Failed to open file")?;
 
         // Write all entries
-        for (time_ms, data) in entries {
+        for (time_ms, entry) in entries {
             let time_s = *time_ms as f32 / 1000.0;
+            let data = &entry.sensor_data;
 
-            let mut line: String<192> = String::new();
+            let mut line: String<256> = String::new();
             let _ = write!(
                 line,
-                "{:.3},{:.1},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.1},{:.1},{:.1}\n",
+                "{:.3},{:.1},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.4},{:.4},{:.4}\n",
                 time_s,
                 data.pressure_pa(),
                 data.temp_celsius(),
                 data.accel_x_g(), data.accel_y_g(), data.accel_z_g(),
                 data.gyro_x_dps(), data.gyro_y_dps(), data.gyro_z_dps(),
                 data.mag_x_ut(), data.mag_y_ut(), data.mag_z_ut(),
+                entry.orientation.roll, entry.orientation.pitch, entry.orientation.yaw,
+                entry.linear_accel_x, entry.linear_accel_y, entry.linear_accel_z,
             );
 
             file.write(line.as_bytes()).map_err(|_| "Write failed")?;

@@ -20,9 +20,10 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use static_cell::StaticCell;
 use panic_probe as _;
 
-use sensors::SensorData;
+use sensors::{SensorData, ImuCalibration, LogEntry};
+use sensors::orientation::OrientationTracker;
 use sdcard::{SdLogger, format_sd_status};
-use telemetry::{format_status, format_telemetry};
+use telemetry::{format_status, format_telemetry, format_calibration, format_telemetry_extended};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
@@ -45,7 +46,7 @@ pub enum SdCommand {
     /// Create a new log file
     CreateFile,
     /// Log a batch of sensor data entries
-    LogBatch([(u64, SensorData); 10], usize), // (buffer, count)
+    LogBatch([(u64, LogEntry); 10], usize), // (buffer, count)
     /// Flush and stop logging
     StopLogging,
 }
@@ -73,8 +74,8 @@ static SD_CMD_CHANNEL: Channel<CriticalSectionRawMutex, SdCommand, 4> = Channel:
 // Response channel: core1 sends responses to core0
 static SD_RESP_CHANNEL: Channel<CriticalSectionRawMutex, SdResponse, 4> = Channel::new();
 // Data channel: high-throughput channel for sensor data during recording
-// Larger buffer (32 entries) to absorb SD write latency
-static SD_DATA_CHANNEL: Channel<CriticalSectionRawMutex, (u64, SensorData), 64> = Channel::new();
+// Larger buffer (64 entries) to absorb SD write latency
+static SD_DATA_CHANNEL: Channel<CriticalSectionRawMutex, (u64, LogEntry), 64> = Channel::new();
 
 // Stack for core1
 static mut CORE1_STACK: Stack<8192> = Stack::new();
@@ -112,7 +113,7 @@ fn core1_main() -> ! {
     };
 
     let mut current_filename: Option<heapless::String<12>> = None;
-    let mut batch_buffer: [(u64, SensorData); 10] = Default::default();
+    let mut batch_buffer: [(u64, LogEntry); 10] = Default::default();
     let mut batch_idx: usize = 0;
 
     loop {
@@ -267,6 +268,10 @@ async fn main(spawner: Spawner) {
     let mut log_filename: Option<heapless::String<12>> = None;
     // Track if SD is available (based on responses from core1)
     let mut sd_available = true;
+    // IMU calibration data
+    let mut imu_calib = ImuCalibration::default();
+    // Orientation tracker
+    let mut orientation_tracker = OrientationTracker::new();
 
     loop {
         class.wait_connection().await;
@@ -337,6 +342,26 @@ async fn main(spawner: Spawner) {
                         counter = counter.wrapping_add(1);
                         let msg = format_telemetry(counter, &sensor_data);
                         let _ = class.write_packet(msg.as_bytes()).await;
+                    } else if cmd.starts_with(b"CALIBRATE") || cmd.starts_with(b"calibrate") {
+                        // Run IMU calibration - device must be stationary and level
+                        let _ = class.write_packet(b"CALIBRATING...\r\n").await;
+                        match sensors::calibration::calibrate_imu(&mut i2c0).await {
+                            Ok(calib) => {
+                                imu_calib = calib;
+                                // Also initialize orientation from accelerometer
+                                if lsm6dsox_ok {
+                                    let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
+                                    orientation_tracker.init_from_accel(&sensor_data, &imu_calib);
+                                }
+                                let msg = format_calibration(&imu_calib);
+                                let _ = class.write_packet(msg.as_bytes()).await;
+                            }
+                            Err(e) => {
+                                let _ = class.write_packet(b"CALIB:ERR ").await;
+                                let _ = class.write_packet(e.as_bytes()).await;
+                                let _ = class.write_packet(b"\r\n").await;
+                            }
+                        }
                     } else if cmd.starts_with(b"LOG") || cmd.starts_with(b"log") {
                         // Request core1 to create a log file
                         let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
@@ -393,6 +418,9 @@ async fn main(spawner: Spawner) {
                         let start_time = Instant::now();
                         let mut bmp_counter: u8 = 0;
 
+                        // Reset orientation tracker for this recording session
+                        orientation_tracker.reset();
+
                         // Stream and log until STOP received
                         'recording: loop {
                             // Read IMU every iteration (50Hz)
@@ -415,16 +443,27 @@ async fn main(spawner: Spawner) {
                             counter = counter.wrapping_add(1);
                             let elapsed_ms = start_time.elapsed().as_millis();
 
+                            // Update orientation from gyroscope data
+                            let orientation = orientation_tracker.update(elapsed_ms, &sensor_data, &imu_calib);
+
                             // Send data to core1 for logging (non-blocking)
                             if logging_active {
+                                // Create log entry with derived measurements
+                                let log_entry = LogEntry {
+                                    sensor_data,
+                                    orientation,
+                                    linear_accel_x: sensor_data.linear_accel_x(&imu_calib),
+                                    linear_accel_y: sensor_data.linear_accel_y(&imu_calib),
+                                    linear_accel_z: sensor_data.linear_accel_z(&imu_calib),
+                                };
                                 // Use try_send to avoid blocking if channel is full
                                 // Data will be dropped if channel is full (better than blocking)
-                                let _ = SD_DATA_CHANNEL.try_send((elapsed_ms, sensor_data));
+                                let _ = SD_DATA_CHANNEL.try_send((elapsed_ms, log_entry));
                             }
 
-                            // Send telemetry over USB every 5th iteration (10Hz)
+                            // Send extended telemetry over USB every 5th iteration (10Hz)
                             if counter % 5 == 0 {
-                                let msg = format_telemetry(counter, &sensor_data);
+                                let msg = format_telemetry_extended(counter, &sensor_data, &orientation, &imu_calib);
                                 if class.write_packet(msg.as_bytes()).await.is_err() {
                                     break 'recording;
                                 }
