@@ -54,6 +54,11 @@ pub struct SensorData {
     pub mag_x: i16,
     pub mag_y: i16,
     pub mag_z: i16,
+
+    // ENS160 (air quality)
+    pub aqi: u8,         // Air Quality Index (1-5, 1=excellent, 5=unhealthy)
+    pub tvoc_ppb: u16,   // Total VOC in parts per billion (0-65000)
+    pub eco2_ppm: u16,   // Equivalent CO2 in parts per million (400-65000)
 }
 
 impl SensorData {

@@ -128,7 +128,7 @@ impl SdLogger {
                         .map_err(|_| "Failed to create file")?;
 
                     // Write CSV header with units
-                    file.write(b"time_s,pressure_Pa,temp_C,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,mag_x_uT,mag_y_uT,mag_z_uT,roll_deg,pitch_deg,yaw_deg,lin_x_g,lin_y_g,lin_z_g\n")
+                    file.write(b"time_s,pressure_Pa,temp_C,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,mag_x_uT,mag_y_uT,mag_z_uT,roll_deg,pitch_deg,yaw_deg,lin_x_g,lin_y_g,lin_z_g,aqi,tvoc_ppb,eco2_ppm\n")
                         .map_err(|_| "Failed to write header")?;
 
                     file.flush().map_err(|_| "Failed to flush")?;
@@ -168,10 +168,10 @@ impl SdLogger {
             let time_s = *time_ms as f32 / 1000.0;
             let data = &entry.sensor_data;
 
-            let mut line: String<256> = String::new();
+            let mut line: String<320> = String::new();
             let _ = write!(
                 line,
-                "{:.3},{:.1},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.4},{:.4},{:.4}\n",
+                "{:.3},{:.1},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.1},{:.1},{:.1},{:.1},{:.1},{:.1},{:.4},{:.4},{:.4},{},{},{}\n",
                 time_s,
                 data.pressure_pa(),
                 data.temp_celsius(),
@@ -180,6 +180,7 @@ impl SdLogger {
                 data.mag_x_ut(), data.mag_y_ut(), data.mag_z_ut(),
                 entry.orientation.roll, entry.orientation.pitch, entry.orientation.yaw,
                 entry.linear_accel_x, entry.linear_accel_y, entry.linear_accel_z,
+                data.aqi, data.tvoc_ppb, data.eco2_ppm,
             );
 
             file.write(line.as_bytes()).map_err(|_| "Write failed")?;

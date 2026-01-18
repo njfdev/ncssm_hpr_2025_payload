@@ -8,6 +8,7 @@ mod telemetry;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::{self, I2c, Config as I2cConfig};
+use embedded_hal_async::i2c::I2c as I2cTrait;
 use embassy_rp::peripherals::{USB, I2C0, I2C1, SPI0, PIN_18, PIN_19, PIN_20, PIN_23};
 use embassy_rp::rom_data::reset_to_usb_boot;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
@@ -260,6 +261,7 @@ async fn main(spawner: Spawner) {
     let bmp390_ok = sensors::bmp390::init(&mut i2c1).await.is_ok();
     let lsm6dsox_ok = sensors::lsm6dsox::init(&mut i2c0).await.is_ok();
     let lis3mdl_ok = sensors::lis3mdl::init(&mut i2c0).await.is_ok();
+    let ens160_ok = sensors::ens160::init(&mut i2c1).await.is_ok();
 
     let mut cmd_buf = [0u8; 64];
     let mut sensor_data = SensorData::default();
@@ -287,7 +289,7 @@ async fn main(spawner: Spawner) {
                     } else if cmd.starts_with(b"PING") || cmd.starts_with(b"ping") {
                         let _ = class.write_packet(b"PONG\r\n").await;
                     } else if cmd.starts_with(b"SENSORS") || cmd.starts_with(b"sensors") {
-                        let msg = format_status(bmp390_ok, lsm6dsox_ok, lis3mdl_ok);
+                        let msg = format_status(bmp390_ok, lsm6dsox_ok, lis3mdl_ok, ens160_ok);
                         let _ = class.write_packet(msg.as_bytes()).await;
                     } else if cmd.starts_with(b"SDSTATUS") || cmd.starts_with(b"sdstatus") {
                         let msg = format_sd_status(sd_available, log_filename.as_ref().map(|s| s.as_str()));
@@ -305,6 +307,9 @@ async fn main(spawner: Spawner) {
                             }
                             if lis3mdl_ok {
                                 let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
+                            }
+                            if ens160_ok {
+                                let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
                             }
 
                             counter = counter.wrapping_add(1);
@@ -339,9 +344,46 @@ async fn main(spawner: Spawner) {
                         if lis3mdl_ok {
                             let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
                         }
+                        if ens160_ok {
+                            let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
+                        }
                         counter = counter.wrapping_add(1);
                         let msg = format_telemetry(counter, &sensor_data);
                         let _ = class.write_packet(msg.as_bytes()).await;
+                    } else if cmd.starts_with(b"SCAN") || cmd.starts_with(b"scan") {
+                        // Scan I2C0 bus for devices
+                        let _ = class.write_packet(b"I2C0 scan:\r\n").await;
+                        let mut found_any = false;
+                        for addr in 0x08u8..0x78u8 {
+                            let mut buf = [0u8; 1];
+                            if i2c0.read(addr, &mut buf).await.is_ok() {
+                                use core::fmt::Write;
+                                let mut msg: heapless::String<16> = heapless::String::new();
+                                let _ = write!(msg, "  0x{:02X}\r\n", addr);
+                                let _ = class.write_packet(msg.as_bytes()).await;
+                                found_any = true;
+                            }
+                        }
+                        if !found_any {
+                            let _ = class.write_packet(b"  (no devices)\r\n").await;
+                        }
+                        // Scan I2C1 bus for devices
+                        let _ = class.write_packet(b"I2C1 scan:\r\n").await;
+                        found_any = false;
+                        for addr in 0x08u8..0x78u8 {
+                            let mut buf = [0u8; 1];
+                            if i2c1.read(addr, &mut buf).await.is_ok() {
+                                use core::fmt::Write;
+                                let mut msg: heapless::String<16> = heapless::String::new();
+                                let _ = write!(msg, "  0x{:02X}\r\n", addr);
+                                let _ = class.write_packet(msg.as_bytes()).await;
+                                found_any = true;
+                            }
+                        }
+                        if !found_any {
+                            let _ = class.write_packet(b"  (no devices)\r\n").await;
+                        }
+                        let _ = class.write_packet(b"OK\r\n").await;
                     } else if cmd.starts_with(b"CALIBRATE") || cmd.starts_with(b"calibrate") {
                         // Run IMU calibration - device must be stationary and level
                         let _ = class.write_packet(b"CALIBRATING...\r\n").await;
@@ -437,6 +479,12 @@ async fn main(spawner: Spawner) {
                                 bmp_counter = 0;
                                 if bmp390_ok {
                                     let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
+                                }
+                                // Also read ENS160 at 10Hz (it updates internally at 1Hz)
+                                if ens160_ok {
+                                    let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
+                                    // Update ENS160 with temperature compensation from BMP390
+                                    let _ = sensors::ens160::set_temperature(&mut i2c1, sensor_data.temp_raw).await;
                                 }
                             }
 

@@ -11,8 +11,11 @@ keywords: [bmp390, ens160, lsm6dsox, lis3mdl, gps, imu, barometer, magnetometer,
 | Sensor | Type | Bus | SDA | SCL | I2C Address |
 |--------|------|-----|-----|-----|-------------|
 | BMP390 | Barometer | I2C1 | GP2 | GP3 | 0x77 (SDO high) |
+| ENS160 | Gas/Air Quality | I2C1 | GP2 | GP3 | 0x53 (ADDR high) |
 | LSM6DSOX | 6-axis IMU | I2C0 | GP28 | GP29 | 0x6A (SA0 low) |
 | LIS3MDL | Magnetometer | I2C0 | GP28 | GP29 | 0x1C (SA1 low) |
+
+**CRITICAL**: Use the SCAN command to verify which I2C bus sensors are actually on. The ENS160 was initially assumed to be on I2C0 but scanning revealed it was on I2C1 with BMP390.
 
 ## BMP390 - Barometric Pressure Sensor
 
@@ -94,6 +97,149 @@ let temp_raw = (data[5] as u32) << 16 | (data[4] as u32) << 8 | data[3] as u32;
 
 // Apply compensation algorithm from datasheet using calibration data
 ```
+
+---
+
+## ENS160 - Digital Metal-Oxide Multi-Gas Sensor
+
+**Datasheet**: [ScioSense ENS160](https://www.sciosense.com/products/environmental-sensors/digital-multi-gas-sensor/)
+
+### Specifications
+- Air Quality Index (AQI): 1-5 scale
+- Total VOC (TVOC): 0-65000 ppb
+- Equivalent CO2 (eCO2): 400-65000 ppm
+- Operating temperature: -40 to +85°C
+- **Warm-up time**: 3 minutes (initial), then 1 second between readings
+
+### I2C Address
+- **0x52**: ADDR pin connected to GND
+- **0x53**: ADDR pin connected to VDDIO ← **Our configuration**
+
+**Note**: The ENS160 also supports SPI mode. When using I2C, the CS pin must be held HIGH.
+
+### Key Registers
+
+| Register | Address | Description |
+|----------|---------|-------------|
+| PART_ID | 0x00 | Part ID (reads 0x0160, 2 bytes LE) |
+| OPMODE | 0x10 | Operating mode |
+| CONFIG | 0x11 | Configuration |
+| COMMAND | 0x12 | Command register |
+| TEMP_IN | 0x13 | Temperature compensation input (2 bytes) |
+| RH_IN | 0x15 | Humidity compensation input (2 bytes) |
+| DEVICE_STATUS | 0x20 | Device status |
+| DATA_AQI | 0x21 | Air Quality Index (1 byte) |
+| DATA_TVOC | 0x22 | TVOC in ppb (2 bytes LE) |
+| DATA_ECO2 | 0x24 | eCO2 in ppm (2 bytes LE) |
+
+### Operating Modes
+- **0x00**: Deep sleep (lowest power)
+- **0x01**: Idle (ready for commands)
+- **0x02**: Standard mode (1 second measurement interval) ← **Use this**
+
+### Status Register (0x20)
+```
+[3:2] VALIDITY: Data validity
+      00 = Normal operation
+      01 = Warm-up phase (data not ready)
+      10 = Initial start-up phase
+      11 = Invalid output
+[1] NEWDAT: New data available
+[0] NEWGPR: New GPR data available
+```
+
+### Initialization Sequence
+```rust
+const ENS160_ADDR: u8 = 0x53;
+const PART_ID: u8 = 0x00;
+const OPMODE: u8 = 0x10;
+const COMMAND: u8 = 0x12;
+
+// 1. Read and verify part ID (should be 0x0160)
+let mut id_buf = [0u8; 2];
+i2c.write_read(ENS160_ADDR, &[PART_ID], &mut id_buf).await?;
+let part_id = u16::from_le_bytes(id_buf);
+assert_eq!(part_id, 0x0160);
+
+// 2. Set to idle mode (required before configuration)
+i2c.write(ENS160_ADDR, &[OPMODE, 0x01]).await?;
+Timer::after_millis(10).await;
+
+// 3. Clear GPR registers (command 0xCC)
+i2c.write(ENS160_ADDR, &[COMMAND, 0xCC]).await?;
+Timer::after_millis(10).await;
+
+// 4. Set to standard operating mode
+i2c.write(ENS160_ADDR, &[OPMODE, 0x02]).await?;
+Timer::after_millis(50).await;
+```
+
+### Reading Data
+```rust
+const DEVICE_STATUS: u8 = 0x20;
+const DATA_AQI: u8 = 0x21;
+const DATA_TVOC: u8 = 0x22;
+const DATA_ECO2: u8 = 0x24;
+
+// Check status first
+let mut status = [0u8];
+i2c.write_read(ENS160_ADDR, &[DEVICE_STATUS], &mut status).await?;
+
+// Check validity bits [3:2]
+let validity = (status[0] & 0x0C) >> 2;
+if validity > 1 {
+    // 0 = normal, 1 = warm-up, 2+ = not ready
+    return Ok(()); // Skip reading, keep previous values
+}
+
+// Read AQI (1 byte)
+let mut aqi_buf = [0u8];
+i2c.write_read(ENS160_ADDR, &[DATA_AQI], &mut aqi_buf).await?;
+let aqi = aqi_buf[0]; // 1-5 scale
+
+// Read TVOC (2 bytes, little-endian)
+let mut tvoc_buf = [0u8; 2];
+i2c.write_read(ENS160_ADDR, &[DATA_TVOC], &mut tvoc_buf).await?;
+let tvoc_ppb = u16::from_le_bytes(tvoc_buf);
+
+// Read eCO2 (2 bytes, little-endian)
+let mut eco2_buf = [0u8; 2];
+i2c.write_read(ENS160_ADDR, &[DATA_ECO2], &mut eco2_buf).await?;
+let eco2_ppm = u16::from_le_bytes(eco2_buf);
+```
+
+### Temperature/Humidity Compensation
+```rust
+const TEMP_IN: u8 = 0x13;
+const RH_IN: u8 = 0x15;
+
+// Temperature in centidegrees (25.5°C = 2550)
+// ENS160 expects: (T + 273.15) * 64
+let temp_encoded = ((temp_centideg as u32 + 27315) * 64 / 100) as u16;
+let bytes = temp_encoded.to_le_bytes();
+i2c.write(ENS160_ADDR, &[TEMP_IN, bytes[0], bytes[1]]).await?;
+
+// Humidity in percent * 100 (50.5% = 5050)
+// ENS160 expects: RH * 512 / 100
+let rh_encoded = (rh_centipercent as u32 * 512 / 10000) as u16;
+let bytes = rh_encoded.to_le_bytes();
+i2c.write(ENS160_ADDR, &[RH_IN, bytes[0], bytes[1]]).await?;
+```
+
+### AQI Interpretation
+| Value | Air Quality |
+|-------|-------------|
+| 1 | Excellent |
+| 2 | Good |
+| 3 | Moderate |
+| 4 | Poor |
+| 5 | Unhealthy |
+
+### Important Notes
+1. **Warm-up time**: ENS160 needs 3+ minutes to provide valid readings after power-on
+2. **Read rate**: Internal update rate is 1Hz in standard mode, so reading faster is pointless
+3. **Temperature compensation**: Feed in ambient temperature for more accurate TVOC/eCO2
+4. **CS pin**: Must be held HIGH for I2C mode (if using breakout board with SPI option)
 
 ---
 
@@ -365,11 +511,42 @@ let mut config = Config::default();
 config.frequency = 400_000; // 400 kHz Fast mode
 let i2c0 = I2c::new_async(p.I2C0, p.PIN_29, p.PIN_28, Irqs, config);
 
-// I2C1 for Barometer (BMP390): SDA=GP2, SCL=GP3
+// I2C1 for Barometer (BMP390) and Gas Sensor (ENS160): SDA=GP2, SCL=GP3
 let i2c1 = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, config);
 ```
 
 **Note**: Embassy I2C::new_async takes pins as (SCL, SDA) not (SDA, SCL).
+
+### I2C Bus Scanning
+Use the SCAN command to discover devices on both I2C buses:
+```rust
+// Add to command handler
+} else if cmd.starts_with(b"SCAN") {
+    use embedded_hal_async::i2c::I2c as I2cTrait;
+
+    let _ = class.write_packet(b"I2C0 scan:\r\n").await;
+    for addr in 0x08u8..0x78u8 {
+        let mut buf = [0u8; 1];
+        if i2c0.read(addr, &mut buf).await.is_ok() {
+            // Device found at addr
+            let mut msg: heapless::String<16> = heapless::String::new();
+            let _ = write!(msg, "  0x{:02X}\r\n", addr);
+            let _ = class.write_packet(msg.as_bytes()).await;
+        }
+    }
+    // Repeat for i2c1...
+}
+```
+
+Expected output for our hardware:
+```
+I2C0 scan:
+  0x1C    # LIS3MDL
+  0x6A    # LSM6DSOX
+I2C1 scan:
+  0x53    # ENS160
+  0x77    # BMP390
+```
 
 ---
 
