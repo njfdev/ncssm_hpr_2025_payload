@@ -2,6 +2,7 @@
 #![no_main]
 
 mod sensors;
+mod sdcard;
 mod telemetry;
 
 use embassy_executor::Spawner;
@@ -17,6 +18,7 @@ use static_cell::StaticCell;
 use panic_probe as _;
 
 use sensors::SensorData;
+use sdcard::{SdLogger, format_sd_status};
 use telemetry::{format_status, format_telemetry};
 
 bind_interrupts!(struct Irqs {
@@ -91,6 +93,14 @@ async fn main(spawner: Spawner) {
     // I2C1 for Barometer (BMP390): SCL=GP3, SDA=GP2
     let mut i2c1 = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, i2c_config);
 
+    // Initialize SD card (SPI0: CLK=GP18, MOSI=GP19, MISO=GP20, CS=GP23)
+    let sd_result = SdLogger::new(p.SPI0, p.PIN_18, p.PIN_19, p.PIN_20, p.PIN_23);
+    let (mut sd_logger, sd_ok) = match sd_result {
+        Ok(logger) => (Some(logger), true),
+        Err(_) => (None, false),
+    };
+    let mut log_filename: Option<heapless::String<12>> = None;
+
     // Give sensors time to power up
     Timer::after_millis(100).await;
 
@@ -102,6 +112,7 @@ async fn main(spawner: Spawner) {
     let mut cmd_buf = [0u8; 64];
     let mut sensor_data = SensorData::default();
     let mut counter: u32 = 0;
+    let mut logging_active = false;
 
     loop {
         class.wait_connection().await;
@@ -173,6 +184,96 @@ async fn main(spawner: Spawner) {
                         counter = counter.wrapping_add(1);
                         let msg = format_telemetry(counter, &sensor_data);
                         let _ = class.write_packet(msg.as_bytes()).await;
+                    } else if cmd.starts_with(b"SDSTATUS") || cmd.starts_with(b"sdstatus") {
+                        // Report SD card status
+                        let msg = format_sd_status(sd_ok, log_filename.as_ref().map(|s| s.as_str()));
+                        let _ = class.write_packet(msg.as_bytes()).await;
+                    } else if cmd.starts_with(b"LOG") || cmd.starts_with(b"log") {
+                        // Start logging to SD card (creates new file)
+                        if let Some(ref mut logger) = sd_logger {
+                            match logger.create_log_file() {
+                                Ok(filename) => {
+                                    log_filename = Some(filename.clone());
+                                    logging_active = true;
+                                    let msg = format_sd_status(true, Some(filename.as_str()));
+                                    let _ = class.write_packet(msg.as_bytes()).await;
+                                }
+                                Err(_) => {
+                                    let _ = class.write_packet(b"SD:FILE_ERR\r\n").await;
+                                }
+                            }
+                        } else {
+                            let _ = class.write_packet(b"SD:NOT_INIT\r\n").await;
+                        }
+                    } else if cmd.starts_with(b"STOPLOG") || cmd.starts_with(b"stoplog") {
+                        // Stop logging to SD card
+                        logging_active = false;
+                        let _ = class.write_packet(b"SD:LOGGING_STOPPED\r\n").await;
+                    } else if cmd.starts_with(b"RECORD") || cmd.starts_with(b"record") {
+                        // Start streaming with SD card logging
+                        // First, create log file if not already logging
+                        if !logging_active {
+                            if let Some(ref mut logger) = sd_logger {
+                                if let Ok(filename) = logger.create_log_file() {
+                                    log_filename = Some(filename.clone());
+                                    logging_active = true;
+                                }
+                            }
+                        }
+
+                        if logging_active {
+                            let _ = class.write_packet(b"RECORDING\r\n").await;
+                        } else {
+                            let _ = class.write_packet(b"STREAMING(NO_SD)\r\n").await;
+                        }
+
+                        // Stream and log until STOP received
+                        'recording: loop {
+                            // Read all sensors
+                            if bmp390_ok {
+                                let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
+                            }
+                            if lsm6dsox_ok {
+                                let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
+                            }
+                            if lis3mdl_ok {
+                                let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
+                            }
+
+                            counter = counter.wrapping_add(1);
+
+                            // Log to SD card if active
+                            if logging_active {
+                                if let (Some(logger), Some(filename)) = (&mut sd_logger, &log_filename) {
+                                    let _ = logger.log_data(filename.as_str(), counter, &sensor_data);
+                                }
+                            }
+
+                            // Send telemetry over USB
+                            let msg = format_telemetry(counter, &sensor_data);
+                            if class.write_packet(msg.as_bytes()).await.is_err() {
+                                break 'recording; // USB disconnected
+                            }
+
+                            // Wait 100ms between readings (10 Hz)
+                            Timer::after_millis(100).await;
+
+                            // Check for incoming command (poll with short timeout)
+                            use embassy_time::with_timeout;
+                            use embassy_time::Duration;
+                            if let Ok(Ok(n)) = with_timeout(Duration::from_millis(1), class.read_packet(&mut cmd_buf)).await {
+                                if n > 0 {
+                                    let stop_cmd = &cmd_buf[..n];
+                                    if stop_cmd.starts_with(b"STOP") || stop_cmd.starts_with(b"stop") {
+                                        logging_active = false;
+                                        let _ = class.write_packet(b"STOPPED\r\n").await;
+                                        break 'recording;
+                                    } else if stop_cmd.starts_with(b"BOOTSEL") || stop_cmd.starts_with(b"bootsel") {
+                                        reset_to_usb_boot(0, 0);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 Ok(_) => {} // Empty packet, keep waiting

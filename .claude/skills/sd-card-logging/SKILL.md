@@ -14,13 +14,27 @@ Flight data logging to SD card via SPI interface using `embedded-sdmmc` crate.
 ```toml
 [dependencies]
 embedded-sdmmc = "0.8"
+embedded-hal = "1.0"
+embedded-hal-bus = "0.2"  # For ExclusiveDevice SpiDevice wrapper
 # Optional: for dynamic allocation if needed
 talc = "4.4"
 ```
 
 ## Hardware Setup
 
-**SPI Connections** (typical pinout):
+### Adafruit Feather RP2040 Adalogger
+
+The Adalogger has a built-in SD card slot using SPI0:
+
+| SD Card Pin | Function | GPIO |
+|-------------|----------|------|
+| CLK | Clock | GP18 |
+| MOSI | Data In | GP19 |
+| MISO | Data Out | GP20 |
+| CS | Chip Select | GP23 |
+
+### Generic SPI SD Card
+
 | SD Card Pin | Function | Pico Pin |
 |-------------|----------|----------|
 | CS | Chip Select | GPIO17 |
@@ -30,31 +44,77 @@ talc = "4.4"
 | VCC | 3.3V | 3V3 |
 | GND | Ground | GND |
 
-## Basic Usage with embedded-sdmmc
+## CRITICAL: embedded-sdmmc 0.8 API Changes
+
+**Version 0.8+ requires `SpiDevice` trait, not raw SPI bus + CS pin.**
+
+You must use `ExclusiveDevice` from `embedded-hal-bus` to wrap your SPI bus:
 
 ```rust
+use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{SdCard, VolumeManager, Mode, VolumeIdx};
-use embassy_rp::spi::{Spi, Config};
+use embassy_rp::spi::{Spi, Config as SpiConfig, Blocking};
 use embassy_rp::gpio::{Output, Level};
-use embassy_time::Delay;
 
-// Setup SPI
-let spi = Spi::new_blocking(
-    p.SPI0,
-    p.PIN_18,  // CLK
-    p.PIN_19,  // MOSI
-    p.PIN_16,  // MISO
-    Config::default(),
-);
+// Delay implementation for SD card init
+pub struct Delay;
+impl embedded_hal::delay::DelayNs for Delay {
+    fn delay_ns(&mut self, ns: u32) {
+        let cycles = ns / 100; // Rough approximation
+        for _ in 0..cycles {
+            cortex_m::asm::nop();
+        }
+    }
+}
 
-let cs = Output::new(p.PIN_17, Level::High);
+// Configure SPI at 400kHz for SD card init (required by spec)
+let mut spi_config = SpiConfig::default();
+spi_config.frequency = 400_000;
 
-// Create SD card instance
-let sdcard = SdCard::new(spi, cs, Delay);
+let spi = Spi::new_blocking(spi0, clk, mosi, miso, spi_config);
+let cs = Output::new(cs_pin, Level::High);
+
+// CRITICAL: Wrap with ExclusiveDevice to get SpiDevice trait
+let spi_dev = ExclusiveDevice::new(spi, cs, Delay).unwrap();
+
+// Now create SD card instance
+let sdcard = SdCard::new(spi_dev, Delay);
+
+// Verify card communication
+let _size = sdcard.num_bytes()?;
 
 // Create volume manager with a time source
-let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource);
+let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
+```
 
+## Embassy-RP 0.9+ Peripheral Types
+
+Embassy 0.9 uses `Peri<'static, T>` wrapper types. Your function signatures should use generics with pin traits:
+
+```rust
+use embassy_rp::spi::{ClkPin, MosiPin, MisoPin};
+use embassy_rp::Peri;
+
+pub fn new<C, MO, MI, CS>(
+    spi0: Peri<'static, SPI0>,
+    clk: Peri<'static, C>,
+    mosi: Peri<'static, MO>,
+    miso: Peri<'static, MI>,
+    cs_pin: Peri<'static, CS>,
+) -> Result<Self, &'static str>
+where
+    C: ClkPin<SPI0> + 'static,
+    MO: MosiPin<SPI0> + 'static,
+    MI: MisoPin<SPI0> + 'static,
+    CS: embassy_rp::gpio::Pin + 'static,
+{
+    // ...
+}
+```
+
+## Basic File Operations
+
+```rust
 // Open first partition
 let mut volume = volume_mgr.open_volume(VolumeIdx(0))?;
 let mut root_dir = volume.open_root_dir()?;
@@ -191,3 +251,42 @@ static ALLOCATOR: Talc<spin::Mutex<()>> = Talc::new(unsafe {
     Span::from_array(&mut HEAP)
 }).lock();
 ```
+
+---
+
+## Troubleshooting
+
+### "SD card not responding"
+1. Check SPI wiring (CLK, MOSI, MISO, CS)
+2. Ensure SD card is FAT32 formatted (not exFAT)
+3. Verify SPI frequency is 400kHz for init (some cards are picky)
+4. Check power supply - SD cards need stable 3.3V
+
+### ExclusiveDevice/SpiDevice errors
+embedded-sdmmc 0.8+ requires `SpiDevice` trait, not raw `SpiBus`. Use `ExclusiveDevice::new(spi, cs, delay)` to wrap your SPI bus.
+
+### Embassy Peri<> type errors
+Embassy 0.9+ uses `Peri<'static, T>` wrapper types. Don't use raw peripheral types like `SPI0` or `PIN_18` in function signatures - use generics with trait bounds or accept `Peri<'static, T>` directly.
+
+### File operations fail silently
+Always check return values. `file.write()` returns `Result` - errors may indicate card full, filesystem corruption, or card ejected.
+
+### Rust 2024 match ergonomics
+In Rust 2024 edition, don't use `ref` or `ref mut` when matching on references:
+```rust
+// Wrong in Rust 2024:
+if let (Some(ref mut logger), Some(ref filename)) = (&mut sd_logger, &log_filename) { ... }
+
+// Correct:
+if let (Some(logger), Some(filename)) = (&mut sd_logger, &log_filename) { ... }
+```
+
+---
+
+## Working Code Reference
+
+The pico_logger implementation in `pico_logger/src/sdcard.rs` provides a complete working example including:
+- SdLogger struct with VolumeManager
+- Automatic file naming (FLT000.CSV, FLT001.CSV, etc.)
+- CSV logging with sensor data
+- Proper Embassy 0.9 peripheral handling
