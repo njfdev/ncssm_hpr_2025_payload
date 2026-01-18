@@ -1,6 +1,7 @@
 ---
 name: orange-pi-4a
 description: Development guidance for Orange Pi 4A SBC. Use when working with camera capture, microphone/audio, video encoding, GPIO, or the flight computer hardware platform.
+keywords: [orange pi, opi4a, allwinner, t527, camera, mipi, csi, microphone, audio, pipewire, ffmpeg-rk, video encoding, h264, h265, gpio, sbc, linux]
 ---
 
 # Orange Pi 4A Development

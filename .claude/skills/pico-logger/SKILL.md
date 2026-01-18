@@ -1,6 +1,7 @@
 ---
 name: pico-logger
 description: Pico Logger subproject context. Use when working in the pico_logger package, RP2040 firmware, sensor data collection, SD card logging, or embedded telemetry.
+keywords: [pico logger, pico_logger, data logger, sensor, adalogger, feather, rp2040, firmware, telemetry, sd card, csv, usb cdc, serial]
 ---
 
 # Pico Logger Subproject

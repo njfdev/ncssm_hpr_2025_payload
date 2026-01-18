@@ -1,6 +1,7 @@
 ---
 name: pico-tooling
 description: Interfacing with Raspberry Pi Pico using picotool, serial communication, and defmt logging. Use when flashing firmware, debugging, setting up serial telemetry, or configuring defmt/probe-rs logging.
+keywords: [picotool, flash, bootsel, uf2, elf, serial, usb, cdc, defmt, probe-rs, debug, logging, pyserial, terminal, pico.sh]
 ---
 
 # Pico Tooling & Serial Communication

@@ -1,6 +1,7 @@
 ---
 name: sd-card-logging
 description: SD card storage and data logging on embedded systems. Use when working with embedded-sdmmc, FAT filesystems, SPI SD cards, flight data logging, or the talc allocator.
+keywords: [sd card, sdcard, embedded-sdmmc, fat32, fat16, spi, logging, csv, data logging, storage, file, adalogger, talc, allocator, ExclusiveDevice]
 ---
 
 # SD Card Logging for Embedded Systems
@@ -69,7 +70,7 @@ impl embedded_hal::delay::DelayNs for Delay {
 
 // Configure SPI at 400kHz for SD card init (required by spec)
 let mut spi_config = SpiConfig::default();
-spi_config.frequency = 400_000;
+spi_config.frequency = 400_000;  // MUST be 400kHz for init
 
 let spi = Spi::new_blocking(spi0, clk, mosi, miso, spi_config);
 let cs = Output::new(cs_pin, Level::High);
@@ -80,11 +81,36 @@ let spi_dev = ExclusiveDevice::new(spi, cs, Delay).unwrap();
 // Now create SD card instance
 let sdcard = SdCard::new(spi_dev, Delay);
 
-// Verify card communication
+// Verify card communication (this completes initialization)
 let _size = sdcard.num_bytes()?;
 
 // Create volume manager with a time source
-let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
+let mut volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
+
+// CRITICAL: Increase SPI speed after initialization!
+// SD cards support high speeds after init. 16MHz is safe for most cards.
+// This provides 40x faster writes compared to staying at 400kHz.
+volume_mgr.device().spi(|spi_dev| {
+    spi_dev.bus_mut().set_frequency(16_000_000);
+});
+```
+
+## CRITICAL: SPI Speed After Initialization
+
+**SD cards require 400kHz for initialization, but support MUCH higher speeds afterward.**
+
+Staying at 400kHz causes severe performance issues:
+- At 400kHz: Each 2KB batch write takes ~48ms
+- At 16MHz: Same write takes ~1ms (40x faster!)
+
+**Symptom of slow SPI**: Timing gaps that start small but grow over time as the FAT table operations become slower with file growth.
+
+**Solution**: Use `volume_mgr.device().spi()` to access the underlying SPI and increase frequency after card init:
+
+```rust
+volume_mgr.device().spi(|spi_dev| {
+    spi_dev.bus_mut().set_frequency(16_000_000);  // 16MHz
+});
 ```
 
 ## Embassy-RP 0.9+ Peripheral Types

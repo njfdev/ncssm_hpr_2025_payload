@@ -1,6 +1,7 @@
 ---
 name: embassy-rp
 description: Embassy HAL for Raspberry Pi RP2040 and RP2350 microcontrollers. Use when working with Pico/Pico 2 peripherals, GPIO, SPI, I2C, UART, PIO, or flashing with picotool.
+keywords: [embassy-rp, rp2040, rp2350, pico, pico2, raspberry pi pico, gpio, spi, i2c, uart, pio, dma, pwm, adc, usb, picotool, memory.x, cortex-m, thumbv6m, thumbv8m]
 ---
 
 # Embassy-RP HAL

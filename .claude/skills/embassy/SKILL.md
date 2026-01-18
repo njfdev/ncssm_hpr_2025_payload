@@ -1,6 +1,7 @@
 ---
 name: embassy
 description: Embassy async embedded framework for Rust. Use when working with async/await in no_std embedded contexts, task executors, or Embassy crates like embassy-executor, embassy-time, embassy-sync.
+keywords: [embassy, async, await, no_std, embedded, executor, embassy-time, embassy-sync, embassy-executor, timer, channel, mutex, signal, spawner, interrupt]
 ---
 
 # Embassy Async Embedded Framework

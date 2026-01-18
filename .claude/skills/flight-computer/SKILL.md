@@ -1,6 +1,7 @@
 ---
 name: flight-computer
 description: Flight computer subproject context. Use when working in the flight_computer package, camera capture, video processing, audio recording, or high-level mission logic.
+keywords: [flight computer, flight_computer, camera, video, audio, nokhwa, recording, mission logic, orange pi, linux, dayton audio, calibration]
 ---
 
 # Flight Computer Subproject

@@ -1,6 +1,7 @@
 ---
 name: ground-station
 description: Ground station subproject context. Use when working in the ground_station package, telemetry reception, mission control interface, or real-time flight monitoring.
+keywords: [ground station, ground_station, telemetry, mission control, monitoring, radio, lora, receiver, display, dashboard]
 ---
 
 # Ground Station Subproject

@@ -1,6 +1,7 @@
 ---
 name: sensor-drivers
 description: Guidance for embedded sensor drivers used in the payload. Use when working with BMP390, ENS160, LSM6DSOX, LIS3MDL, GPS, IMU, barometer, or any sensor integration.
+keywords: [bmp390, ens160, lsm6dsox, lis3mdl, gps, imu, barometer, magnetometer, accelerometer, gyroscope, pressure, temperature, altitude, i2c, sensor, embedded-hal]
 ---
 
 # Payload Sensor Drivers

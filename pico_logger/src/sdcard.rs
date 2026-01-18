@@ -17,6 +17,12 @@ use heapless::String;
 
 use crate::sensors::SensorData;
 
+/// SPI frequency for SD card initialization (required by SD spec)
+const SD_SPI_FREQ_INIT: u32 = 400_000;
+
+/// SPI frequency for normal SD card operations (much faster after init)
+const SD_SPI_FREQ_FAST: u32 = 16_000_000;
+
 /// Dummy time source - returns fixed timestamp
 struct DummyTimeSource;
 
@@ -56,6 +62,7 @@ pub struct SdLogger {
 impl SdLogger {
     /// Initialize SD card and return logger
     /// Takes ownership of SPI0 and the SD card pins
+    /// Initializes at 400kHz (required by SD spec) then increases to 16MHz for fast operations
     pub fn new<C, MO, MI, CS>(
         spi0: Peri<'static, SPI0>,
         clk: Peri<'static, C>,
@@ -69,9 +76,9 @@ impl SdLogger {
         MI: MisoPin<SPI0> + 'static,
         CS: embassy_rp::gpio::Pin + 'static,
     {
-        // Configure SPI at 400kHz for SD card init (required by spec)
+        // Configure SPI at 400kHz for SD card initialization (required by SD spec)
         let mut spi_config = SpiConfig::default();
-        spi_config.frequency = 400_000;
+        spi_config.frequency = SD_SPI_FREQ_INIT;
 
         let spi = Spi::new_blocking(spi0, clk, mosi, miso, spi_config);
         let cs = Output::new(cs_pin, Level::High);
@@ -82,11 +89,17 @@ impl SdLogger {
         // Create SD card instance
         let sdcard = SdCard::new(spi_dev, Delay);
 
-        // Get card size to verify communication
+        // Get card size to verify communication (this completes card initialization)
         let _size = sdcard.num_bytes().map_err(|_| "SD card not responding")?;
 
         // Create volume manager
-        let volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
+        let mut volume_mgr = VolumeManager::new(sdcard, DummyTimeSource);
+
+        // After successful init, increase SPI speed to 16MHz for faster operations
+        // This is safe because SD cards support high speeds after initialization
+        volume_mgr.device().spi(|spi_dev| {
+            spi_dev.bus_mut().set_frequency(SD_SPI_FREQ_FAST);
+        });
 
         Ok(Self { volume_mgr })
     }
@@ -114,8 +127,8 @@ impl SdLogger {
                         .open_file_in_dir(name.as_str(), Mode::ReadWriteCreateOrAppend)
                         .map_err(|_| "Failed to create file")?;
 
-                    // Write CSV header
-                    file.write(b"counter,pressure,temp,accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,mag_x,mag_y,mag_z\n")
+                    // Write CSV header with units
+                    file.write(b"time_s,pressure_Pa,temp_C,accel_x_g,accel_y_g,accel_z_g,gyro_x_dps,gyro_y_dps,gyro_z_dps,mag_x_uT,mag_y_uT,mag_z_uT\n")
                         .map_err(|_| "Failed to write header")?;
 
                     file.flush().map_err(|_| "Failed to flush")?;
@@ -130,8 +143,14 @@ impl SdLogger {
         Err("No available filenames")
     }
 
-    /// Append a sensor data row to the currently open file
-    pub fn log_data(&mut self, filename: &str, counter: u32, data: &SensorData) -> Result<(), &'static str> {
+    /// Append a batch of sensor data rows to the file
+    /// Opens the file once, writes all entries, then closes.
+    /// entries: slice of (time_ms, SensorData) tuples
+    pub fn log_batch(&mut self, filename: &str, entries: &[(u64, SensorData)]) -> Result<(), &'static str> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
         let mut volume = self.volume_mgr
             .open_volume(VolumeIdx(0))
             .map_err(|_| "Failed to open volume")?;
@@ -144,23 +163,25 @@ impl SdLogger {
             .open_file_in_dir(filename, Mode::ReadWriteAppend)
             .map_err(|_| "Failed to open file")?;
 
-        // Format CSV line
-        let mut line: String<128> = String::new();
-        let _ = write!(
-            line,
-            "{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            counter,
-            data.pressure_raw,
-            data.temp_raw,
-            data.accel_x, data.accel_y, data.accel_z,
-            data.gyro_x, data.gyro_y, data.gyro_z,
-            data.mag_x, data.mag_y, data.mag_z,
-        );
+        // Write all entries
+        for (time_ms, data) in entries {
+            let time_s = *time_ms as f32 / 1000.0;
 
-        file.write(line.as_bytes()).map_err(|_| "Write failed")?;
+            let mut line: String<192> = String::new();
+            let _ = write!(
+                line,
+                "{:.3},{:.1},{:.2},{:.4},{:.4},{:.4},{:.2},{:.2},{:.2},{:.1},{:.1},{:.1}\n",
+                time_s,
+                data.pressure_pa(),
+                data.temp_celsius(),
+                data.accel_x_g(), data.accel_y_g(), data.accel_z_g(),
+                data.gyro_x_dps(), data.gyro_y_dps(), data.gyro_z_dps(),
+                data.mag_x_ut(), data.mag_y_ut(), data.mag_z_ut(),
+            );
 
-        // Flush periodically (every 100 writes would be handled by caller)
-        // For now, always flush for safety
+            file.write(line.as_bytes()).map_err(|_| "Write failed")?;
+        }
+
         file.flush().map_err(|_| "Flush failed")?;
 
         Ok(())

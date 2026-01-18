@@ -19,7 +19,7 @@ const CTRL3_C: u8 = 0x12;
 const OUTX_L_G: u8 = 0x22;
 
 /// Initialize LSM6DSOX IMU
-/// Configures accelerometer at 104 Hz, ±16g and gyroscope at 104 Hz, ±2000 dps
+/// Configures accelerometer at 416 Hz, ±16g and gyroscope at 416 Hz, ±2000 dps
 pub async fn init(i2c: &mut I2c<'static, I2C0, Async>) -> Result<(), i2c::Error> {
     // Read WHO_AM_I
     let mut who = [0u8];
@@ -33,11 +33,11 @@ pub async fn init(i2c: &mut I2c<'static, I2C0, Async>) -> Result<(), i2c::Error>
     i2c.write(ADDR, &[CTRL3_C, 0x01]).await?;
     Timer::after_millis(10).await;
 
-    // Configure accelerometer: 104 Hz, ±16g
-    i2c.write(ADDR, &[CTRL1_XL, 0x44]).await?;
+    // Configure accelerometer: 416 Hz (0x60), ±16g (0x04)
+    i2c.write(ADDR, &[CTRL1_XL, 0x64]).await?;
 
-    // Configure gyroscope: 104 Hz, ±2000 dps
-    i2c.write(ADDR, &[CTRL2_G, 0x4C]).await?;
+    // Configure gyroscope: 416 Hz (0x60), ±2000 dps (0x0C)
+    i2c.write(ADDR, &[CTRL2_G, 0x6C]).await?;
 
     Ok(())
 }

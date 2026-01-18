@@ -19,7 +19,7 @@ const CTRL_REG4: u8 = 0x23;
 const OUT_X_L: u8 = 0x28;
 
 /// Initialize LIS3MDL magnetometer
-/// Configures at 80 Hz, ±4 gauss, ultra-high performance
+/// Configures at 155 Hz (FAST_ODR), ±4 gauss, ultra-high performance
 pub async fn init(i2c: &mut I2c<'static, I2C0, Async>) -> Result<(), i2c::Error> {
     // Read WHO_AM_I
     let mut who = [0u8];
@@ -29,8 +29,9 @@ pub async fn init(i2c: &mut I2c<'static, I2C0, Async>) -> Result<(), i2c::Error>
         return Err(i2c::Error::Abort(i2c::AbortReason::NoAcknowledge));
     }
 
-    // Configure CTRL_REG1: temp enable, ultra-high perf XY, 80 Hz
-    i2c.write(ADDR, &[CTRL_REG1, 0xFC]).await?;
+    // Configure CTRL_REG1: temp enable, ultra-high perf XY, FAST_ODR (155 Hz)
+    // Bits: TEMP_EN=1, OM=11 (ultra-high), DO=111 (80Hz base), FAST_ODR=1
+    i2c.write(ADDR, &[CTRL_REG1, 0xFE]).await?;
 
     // Configure CTRL_REG2: ±4 gauss
     i2c.write(ADDR, &[CTRL_REG2, 0x00]).await?;
