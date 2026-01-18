@@ -190,6 +190,83 @@ impl SdLogger {
 
         Ok(())
     }
+
+    /// Find the latest (highest numbered) FLT###.CSV file
+    /// Returns the filename if found
+    pub fn find_latest_file(&mut self) -> Result<heapless::String<12>, &'static str> {
+        let mut volume = self.volume_mgr
+            .open_volume(VolumeIdx(0))
+            .map_err(|_| "Failed to open volume")?;
+
+        let mut root_dir = volume
+            .open_root_dir()
+            .map_err(|_| "Failed to open root dir")?;
+
+        // Find highest numbered FLT file by scanning forward until we find a gap
+        // This is faster than searching backward from 999
+        let mut latest: Option<u16> = None;
+        for i in 0..1000u16 {
+            let mut name: String<12> = String::new();
+            let _ = write!(name, "FLT{:03}.CSV", i);
+
+            if root_dir.find_directory_entry(name.as_str()).is_ok() {
+                latest = Some(i);
+            } else {
+                // First missing file means previous one was the latest
+                break;
+            }
+        }
+
+        match latest {
+            Some(n) => {
+                let mut name: String<12> = String::new();
+                let _ = write!(name, "FLT{:03}.CSV", n);
+                Ok(name)
+            }
+            None => Err("No log files found"),
+        }
+    }
+
+    /// Read a chunk of a file at the given offset
+    /// Returns the number of bytes read (0 = EOF)
+    pub fn read_file_chunk(&mut self, filename: &str, offset: u32, buffer: &mut [u8]) -> Result<usize, &'static str> {
+        let mut volume = self.volume_mgr
+            .open_volume(VolumeIdx(0))
+            .map_err(|_| "Failed to open volume")?;
+
+        let mut root_dir = volume
+            .open_root_dir()
+            .map_err(|_| "Failed to open root dir")?;
+
+        let mut file = root_dir
+            .open_file_in_dir(filename, Mode::ReadOnly)
+            .map_err(|_| "Failed to open file")?;
+
+        // Seek to offset
+        file.seek_from_start(offset).map_err(|_| "Seek failed")?;
+
+        // Read into buffer
+        let bytes_read = file.read(buffer).map_err(|_| "Read failed")?;
+
+        Ok(bytes_read)
+    }
+
+    /// Get the size of a file in bytes
+    pub fn get_file_size(&mut self, filename: &str) -> Result<u32, &'static str> {
+        let mut volume = self.volume_mgr
+            .open_volume(VolumeIdx(0))
+            .map_err(|_| "Failed to open volume")?;
+
+        let mut root_dir = volume
+            .open_root_dir()
+            .map_err(|_| "Failed to open root dir")?;
+
+        let entry = root_dir
+            .find_directory_entry(filename)
+            .map_err(|_| "File not found")?;
+
+        Ok(entry.size)
+    }
 }
 
 /// Format SD card status message

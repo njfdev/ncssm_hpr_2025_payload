@@ -50,7 +50,16 @@ pub enum SdCommand {
     LogBatch([(u64, LogEntry); 10], usize), // (buffer, count)
     /// Flush and stop logging
     StopLogging,
+    /// Find the latest log file
+    FindLatestFile,
+    /// Read a chunk of a file (filename, offset)
+    ReadFileChunk(heapless::String<12>, u32),
+    /// Get file size
+    GetFileSize(heapless::String<12>),
 }
+
+/// Chunk size for file transfers (must fit in USB packet with overhead)
+pub const FILE_CHUNK_SIZE: usize = 512;
 
 /// Responses from core1
 #[derive(Clone)]
@@ -67,6 +76,16 @@ pub enum SdResponse {
     Stopped,
     /// SD card not initialized
     NotInitialized,
+    /// Latest file found
+    LatestFile(heapless::String<12>),
+    /// No log files found
+    NoFiles,
+    /// File chunk read (data, bytes_read)
+    FileChunk([u8; FILE_CHUNK_SIZE], usize),
+    /// File read error
+    ReadError,
+    /// File size
+    FileSize(u32),
 }
 
 // Channels for core0 <-> core1 communication
@@ -155,6 +174,49 @@ fn core1_main() -> ! {
                     }
                     current_filename = None;
                     let _ = SD_RESP_CHANNEL.try_send(SdResponse::Stopped);
+                }
+                SdCommand::FindLatestFile => {
+                    if let Some(ref mut logger) = sd_logger {
+                        match logger.find_latest_file() {
+                            Ok(filename) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::LatestFile(filename));
+                            }
+                            Err(_) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::NoFiles);
+                            }
+                        }
+                    } else {
+                        let _ = SD_RESP_CHANNEL.try_send(SdResponse::NotInitialized);
+                    }
+                }
+                SdCommand::ReadFileChunk(filename, offset) => {
+                    if let Some(ref mut logger) = sd_logger {
+                        let mut buffer = [0u8; FILE_CHUNK_SIZE];
+                        match logger.read_file_chunk(filename.as_str(), offset, &mut buffer) {
+                            Ok(bytes_read) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::FileChunk(buffer, bytes_read));
+                            }
+                            Err(_) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::ReadError);
+                            }
+                        }
+                    } else {
+                        let _ = SD_RESP_CHANNEL.try_send(SdResponse::NotInitialized);
+                    }
+                }
+                SdCommand::GetFileSize(filename) => {
+                    if let Some(ref mut logger) = sd_logger {
+                        match logger.get_file_size(filename.as_str()) {
+                            Ok(size) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::FileSize(size));
+                            }
+                            Err(_) => {
+                                let _ = SD_RESP_CHANNEL.try_send(SdResponse::ReadError);
+                            }
+                        }
+                    } else {
+                        let _ = SD_RESP_CHANNEL.try_send(SdResponse::NotInitialized);
+                    }
                 }
             }
         }
@@ -536,6 +598,83 @@ async fn main(spawner: Spawner) {
                                         reset_to_usb_boot(0, 0);
                                     }
                                 }
+                            }
+                        }
+                    } else if cmd.starts_with(b"DOWNLOAD") || cmd.starts_with(b"download") {
+                        // Download the latest log file over USB
+                        use embassy_time::with_timeout;
+                        use embassy_time::Duration;
+                        use core::fmt::Write;
+
+                        // First, find the latest file
+                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::FindLatestFile);
+
+                        match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
+                            Ok(SdResponse::LatestFile(filename)) => {
+                                // Get file size
+                                let _ = SD_CMD_CHANNEL.try_send(SdCommand::GetFileSize(filename.clone()));
+
+                                match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
+                                    Ok(SdResponse::FileSize(size)) => {
+                                        // Send header: FILE:<name>,<size>\r\n
+                                        let mut header: heapless::String<64> = heapless::String::new();
+                                        let _ = write!(header, "FILE:{},{}\r\n", filename, size);
+                                        let _ = class.write_packet(header.as_bytes()).await;
+
+                                        // Transfer file in chunks
+                                        let mut offset: u32 = 0;
+                                        let mut transfer_ok = true;
+
+                                        while offset < size && transfer_ok {
+                                            if SD_CMD_CHANNEL.try_send(SdCommand::ReadFileChunk(filename.clone(), offset)).is_err() {
+                                                transfer_ok = false;
+                                                continue;
+                                            }
+
+                                            // Small delay to let core1 process command
+                                            Timer::after_millis(10).await;
+
+                                            match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
+                                                Ok(SdResponse::FileChunk(data, bytes_read)) => {
+                                                    if bytes_read == 0 {
+                                                        break; // EOF
+                                                    }
+                                                    // Send data in USB-sized chunks (max 64 bytes per packet)
+                                                    let mut sent = 0;
+                                                    while sent < bytes_read && transfer_ok {
+                                                        let chunk_end = core::cmp::min(sent + 64, bytes_read);
+                                                        if class.write_packet(&data[sent..chunk_end]).await.is_err() {
+                                                            transfer_ok = false;
+                                                        }
+                                                        sent = chunk_end;
+                                                    }
+                                                    offset += bytes_read as u32;
+                                                }
+                                                Ok(SdResponse::ReadError) | Ok(SdResponse::NotInitialized) | Ok(_) | Err(_) => {
+                                                    transfer_ok = false;
+                                                }
+                                            }
+                                        }
+
+                                        if transfer_ok {
+                                            let _ = class.write_packet(b"\r\nEOF\r\n").await;
+                                        } else {
+                                            let _ = class.write_packet(b"\r\nERROR:TRANSFER\r\n").await;
+                                        }
+                                    }
+                                    _ => {
+                                        let _ = class.write_packet(b"ERROR:SIZE\r\n").await;
+                                    }
+                                }
+                            }
+                            Ok(SdResponse::NoFiles) => {
+                                let _ = class.write_packet(b"ERROR:NO_FILES\r\n").await;
+                            }
+                            Ok(SdResponse::NotInitialized) => {
+                                let _ = class.write_packet(b"ERROR:SD_NOT_INIT\r\n").await;
+                            }
+                            _ => {
+                                let _ = class.write_packet(b"ERROR:TIMEOUT\r\n").await;
                             }
                         }
                     }
