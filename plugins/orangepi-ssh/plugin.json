@@ -1,0 +1,12 @@
+{
+  "name": "orangepi-ssh",
+  "version": "1.0.0",
+  "description": "Interface with Orange Pi over SSH for payload development and debugging",
+  "author": {
+    "name": "NCSSM Robotics",
+    "url": "https://github.com/ncssm-robotics"
+  },
+  "repository": "https://github.com/ncssm-robotics/ncssm_hpr_2025_payload",
+  "license": "MIT",
+  "keywords": ["orangepi", "ssh", "payload", "hpr", "rocketry"]
+}

@@ -1,0 +1,13 @@
+{
+  "name": "valencia-payload",
+  "description": "Skills for the NCSSM HPR 2025 Valencia Payload project",
+  "version": "1.0.0",
+  "plugins": [
+    {
+      "name": "orangepi-ssh",
+      "description": "Interface with the Orange Pi payload computer over SSH",
+      "source": "./orangepi-ssh",
+      "skills": ["./skills/orangepi-ssh"]
+    }
+  ]
+}
