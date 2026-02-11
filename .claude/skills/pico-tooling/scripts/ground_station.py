@@ -56,15 +56,44 @@ def find_device():
     return None
 
 
+def read_response(ser, timeout=1.0):
+    """Read all available response data, waiting up to timeout seconds.
+
+    Waits for the first byte to arrive, then keeps reading until
+    no more data arrives for 50ms (end of message).
+    """
+    deadline = time.time() + timeout
+    result = b""
+
+    # Wait for first byte
+    while time.time() < deadline:
+        if ser.in_waiting > 0:
+            result += ser.read(ser.in_waiting)
+            break
+        time.sleep(0.01)
+    else:
+        return ""
+
+    # Keep reading until 50ms silence (message complete)
+    while True:
+        time.sleep(0.05)
+        if ser.in_waiting > 0:
+            result += ser.read(ser.in_waiting)
+        else:
+            break
+
+    return result.decode("utf-8", errors="replace")
+
+
 def interactive_mode(port: str):
     """Run an interactive serial terminal."""
     try:
-        ser = serial.Serial(port, 115200, timeout=0.1)
+        ser = serial.Serial(port, 115200, timeout=1)
     except serial.SerialException as e:
         print(f"Error opening {port}: {e}")
         sys.exit(1)
 
-    time.sleep(0.5)
+    time.sleep(1.5)
     ser.reset_input_buffer()
 
     print(f"Ground Station connected on {port}")
@@ -74,16 +103,13 @@ def interactive_mode(port: str):
     # Send initial PING to verify connection
     ser.write(b"PING")
     ser.flush()
-    time.sleep(0.3)
-    waiting = ser.in_waiting
-    if waiting > 0:
-        resp = ser.read(waiting).decode("utf-8", errors="replace").strip()
-        print(f"< {resp}")
+    resp = read_response(ser)
+    if resp:
+        print(f"< {resp.strip()}")
     else:
         print("Warning: no response to PING")
     print()
 
-    # Use raw terminal mode so we can read char-by-char in passthrough
     old_settings = termios.tcgetattr(sys.stdin)
 
     try:
@@ -101,18 +127,18 @@ def line_mode(ser: serial.Serial, old_settings):
         # Restore cooked mode for line editing
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
+        # Print any data that arrived while waiting for input
+        if ser.in_waiting > 0:
+            data = ser.read(ser.in_waiting).decode("utf-8", errors="replace")
+            sys.stdout.write(data)
+            sys.stdout.flush()
+
         try:
             cmd = input("> ").strip()
         except EOFError:
             break
 
         if not cmd:
-            # Check for any incoming data
-            waiting = ser.in_waiting
-            if waiting > 0:
-                data = ser.read(waiting).decode("utf-8", errors="replace")
-                sys.stdout.write(data)
-                sys.stdout.flush()
             continue
 
         if cmd.lower() in ("quit", "exit", "q"):
@@ -124,27 +150,22 @@ def line_mode(ser: serial.Serial, old_settings):
 
         # Special handling for mode-switching commands
         if cmd.upper() == "PASSTHROUGH":
-            time.sleep(0.3)
-            waiting = ser.in_waiting
-            if waiting > 0:
-                resp = ser.read(waiting).decode("utf-8", errors="replace")
+            resp = read_response(ser)
+            if resp:
                 sys.stdout.write(resp)
                 sys.stdout.flush()
             raw_mode(ser, old_settings)
             continue
 
         if cmd.upper() == "ATMODE":
-            time.sleep(0.3)
-            waiting = ser.in_waiting
-            if waiting > 0:
-                resp = ser.read(waiting).decode("utf-8", errors="replace")
+            # Read the "ENTERING AT MODE..." response
+            resp = read_response(ser, timeout=1)
+            if resp:
                 sys.stdout.write(resp)
                 sys.stdout.flush()
-            # Wait for guard times + response
-            time.sleep(2.5)
-            waiting = ser.in_waiting
-            if waiting > 0:
-                resp = ser.read(waiting).decode("utf-8", errors="replace")
+            # Wait for guard times (1s + 1s) + "AT MODE READY"
+            resp = read_response(ser, timeout=3)
+            if resp:
                 sys.stdout.write(resp)
                 sys.stdout.flush()
             at_mode(ser, old_settings)
@@ -156,10 +177,8 @@ def line_mode(ser: serial.Serial, old_settings):
             break
 
         # Read response
-        time.sleep(0.3)
-        waiting = ser.in_waiting
-        if waiting > 0:
-            resp = ser.read(waiting).decode("utf-8", errors="replace")
+        resp = read_response(ser)
+        if resp:
             sys.stdout.write(f"< {resp}")
             if not resp.endswith("\n"):
                 sys.stdout.write("\n")
@@ -174,7 +193,6 @@ def raw_mode(ser: serial.Serial, old_settings):
 
     try:
         while True:
-            # Check for input from either stdin or serial
             readable, _, _ = select.select([stdin_fd, ser], [], [], 0.05)
 
             for source in readable:
@@ -186,7 +204,6 @@ def raw_mode(ser: serial.Serial, old_settings):
                     waiting = ser.in_waiting
                     if waiting > 0:
                         data = ser.read(waiting)
-                        # Check if we got the exit message
                         if b"EXITING PASSTHROUGH" in data:
                             termios.tcsetattr(
                                 sys.stdin, termios.TCSADRAIN, old_settings
@@ -210,37 +227,34 @@ def at_mode(ser: serial.Serial, old_settings):
     while True:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
 
+        # Print any data that arrived
+        if ser.in_waiting > 0:
+            data = ser.read(ser.in_waiting).decode("utf-8", errors="replace")
+            sys.stdout.write(data)
+            sys.stdout.flush()
+
         try:
             cmd = input("AT> ").strip()
         except EOFError:
             break
 
         if not cmd:
-            waiting = ser.in_waiting
-            if waiting > 0:
-                data = ser.read(waiting).decode("utf-8", errors="replace")
-                sys.stdout.write(data)
-                sys.stdout.flush()
             continue
 
         ser.write(cmd.encode("utf-8"))
         ser.flush()
 
         if cmd.upper() in ("EXITAT", "ATO"):
-            time.sleep(0.5)
-            waiting = ser.in_waiting
-            if waiting > 0:
-                resp = ser.read(waiting).decode("utf-8", errors="replace")
+            resp = read_response(ser)
+            if resp:
                 sys.stdout.write(resp)
                 sys.stdout.flush()
             print("[Back to COMMAND mode]")
             return
 
         # Wait for AT response
-        time.sleep(0.5)
-        waiting = ser.in_waiting
-        if waiting > 0:
-            resp = ser.read(waiting).decode("utf-8", errors="replace")
+        resp = read_response(ser)
+        if resp:
             sys.stdout.write(resp)
             if not resp.endswith("\n"):
                 sys.stdout.write("\n")
