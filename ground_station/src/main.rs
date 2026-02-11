@@ -92,6 +92,9 @@ async fn main(spawner: Spawner) {
         let mut mode = Mode::Command;
         escape.reset();
 
+        // Drain any stale UART data that arrived while disconnected
+        while UART_TO_USB.try_receive().is_ok() {}
+
         'connected: loop {
             match mode {
                 Mode::Command => {
@@ -176,9 +179,9 @@ async fn main(spawner: Spawner) {
                         Either::First(Err(_)) => break 'connected,
                         // UART data received - forward to USB
                         Either::Second(packet) => {
-                            let _ = class
-                                .write_packet(&packet.buf[..packet.len])
-                                .await;
+                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
+                                break 'connected;
+                            }
                         }
                     }
                 }
@@ -216,9 +219,9 @@ async fn main(spawner: Spawner) {
                         Either::First(Err(_)) => break 'connected,
                         Either::Second(packet) => {
                             // Forward UART -> USB
-                            let _ = class
-                                .write_packet(&packet.buf[..packet.len])
-                                .await;
+                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
+                                break 'connected;
+                            }
                         }
                     }
                 }
@@ -265,9 +268,9 @@ async fn main(spawner: Spawner) {
                         Either::First(Err(_)) => break 'connected,
                         Either::Second(packet) => {
                             // Forward AT responses to USB
-                            let _ = class
-                                .write_packet(&packet.buf[..packet.len])
-                                .await;
+                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
+                                break 'connected;
+                            }
                         }
                     }
                 }
