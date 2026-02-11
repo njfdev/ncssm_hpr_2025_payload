@@ -1,96 +1,106 @@
 ---
 name: ground-station
 description: Ground station subproject context. Use when working in the ground_station package, telemetry reception, mission control interface, or real-time flight monitoring.
-keywords: [ground station, ground_station, telemetry, mission control, monitoring, radio, lora, receiver, display, dashboard]
+keywords: [ground station, ground_station, telemetry, mission control, monitoring, radio, RFD 900x, receiver, UART bridge, USB CDC]
 ---
 
-# Ground Station Subproject
+# Ground Station - RFD 900x USB-UART Bridge
 
 ## Role in System
 
-The ground station is the **mission control and telemetry reception** component, running on a laptop or desktop computer on the ground.
+The ground station is an **RP2040 Embassy firmware** (Adafruit Feather RP2040, same board as pico_logger) that bridges USB CDC serial and UART to interface with an RFD 900x-US radio modem. Primary use case is receiving telemetry from the rocket during flight.
 
-### Responsibilities
-- Receive real-time telemetry from rocket during flight
-- Display flight data (altitude, velocity, GPS position, sensor readings)
-- Provide mission control interface
-- Log received data for post-flight analysis
-- Alert on anomalies or mission events
-
-### Communication
-- Receives telemetry from rocket (radio link TBD)
-- Protocol and hardware to be determined
+**Data flow**: Computer <-> USB CDC <-> RP2040 <-> UART (57600 8N1, TX=GP0, RX=GP1) <-> RFD 900x
 
 ## Project Structure
 
 ```
 ground_station/
-├── Cargo.toml
-├── Cargo.lock
+├── .cargo/config.toml  # thumbv6m-none-eabi target, picotool runner
+├── build.rs            # Copies memory.x, sets linker flags
+├── memory.x            # RP2040 memory layout (2MB flash, 256K RAM)
+├── Cargo.toml          # Embassy dependencies
 └── src/
-    └── main.rs    # Entry point (stub)
+    ├── main.rs          # Entry point, USB CDC + UART setup, command loop
+    ├── protocol.rs      # Mode enum, DataPacket, EscapeDetector
+    └── uart_bridge.rs   # UART rx/tx async tasks, inter-task channels
 ```
 
-## Build & Run
+## Build & Flash
 
 ```bash
 cd ground_station
 cargo build --release
-cargo run --release
+cargo run --release  # Uses picotool to flash (device must be in BOOTSEL mode)
 ```
 
-**Target**: Standard desktop (Linux, macOS, Windows)
+**Target**: `thumbv6m-none-eabi` (RP2040 Cortex-M0+)
 
-## Current Implementation
+## Operating Modes
 
-Minimal stub:
+### Command Mode (default)
+- UART RX data forwarded to USB
+- USB input interpreted as local commands
 
-```rust
-fn main() {
-    println!("Hello, world!");
-}
-```
+| Command | Action |
+|---------|--------|
+| `PING` | Responds `PONG\r\n` |
+| `BOOTSEL` | Reboot to BOOTSEL mode |
+| `STATUS` | Show current mode and UART config |
+| `PASSTHROUGH` | Enter transparent bridge mode |
+| `ATMODE` | Enter AT config mode (handles +++ guard times) |
+| `SEND <data>` | Send payload bytes through radio |
+| `HELP` | List available commands |
 
-## Planned Features
+### Passthrough Mode
+- Fully transparent bidirectional USB <-> UART bridge
+- All USB data forwarded to UART and vice versa
+- **Exit**: 3x Ctrl-A (0x01 0x01 0x01) returns to Command mode
 
-- [ ] Radio receiver integration (hardware TBD)
-- [ ] Telemetry packet parsing
-- [ ] Real-time data display (TUI or GUI)
-- [ ] GPS tracking visualization
-- [ ] Flight phase detection
-- [ ] Data logging
-- [ ] Alerts and notifications
+### AT Config Mode
+- For RFD 900x AT command configuration
+- Entry sends `+++` with 1-second guard times
+- USB input forwarded to UART as AT commands
+- UART responses forwarded to USB
+- **Exit**: `EXITAT` (local) or `ATO` (also sent to radio)
 
-## Potential Dependencies
+## Architecture
 
-| Crate | Purpose |
-|-------|---------|
-| serialport | Serial/radio communication |
-| egui/iced | GUI framework |
-| ratatui | Terminal UI |
-| plotters | Data visualization |
-| tokio | Async runtime |
+### Async Tasks (Embassy)
+- `main` - Init, USB CDC command loop, mode switching
+- `usb_task` - Drives USB device stack
+- `uart_rx_task` - Reads UART with 2ms inter-byte timeout batching into DataPackets
+- `uart_tx_task` - Reads DataPackets from channel, writes to UART
 
-## Design Considerations
+### Inter-Task Communication
+Two `Channel<CriticalSectionRawMutex, DataPacket, 8>` statics:
+- `UART_TO_USB` - Radio data → computer
+- `USB_TO_UART` - Computer data → radio
 
-### Telemetry Protocol
-- Packet format matching Pico Logger output
-- Error detection (CRC)
-- Handling packet loss
+### DataPacket
+64-byte buffer + length, Copy type for use in channels.
 
-### Display Requirements
-- Real-time altitude graph
-- GPS map view
-- Sensor data panels
-- Flight phase indicator
-- Signal strength
+## Hardware Configuration
 
-### Radio Options
-- LoRa modules (long range, low bandwidth)
-- 900MHz/433MHz ISM band
-- Consider amateur radio regulations
+- **Board**: Adafruit Feather RP2040
+- **USB**: CDC ACM, VID=0x2e8a PID=0x000b, "Ground Station RFD Bridge"
+- **UART0**: 57600 baud, 8N1, TX=GP0, RX=GP1, DMA channels 0/1
+- **Radio**: RFD 900x-US (connected to UART0)
+
+## Key Gotchas
+
+### embassy-rp 0.9.0 UART Types
+- `UartTx<'d, M: Mode>` and `UartRx<'d, M: Mode>` use **Mode** (Async/Blocking) as generic, NOT the peripheral type
+- `Uart::new()` takes 7 args: `(uart, tx_pin, rx_pin, irq_binding, tx_dma, rx_dma, config)`
+- UART requires interrupt binding even for DMA mode: `UART0_IRQ => uart::InterruptHandler<UART0>`
+- Task function signatures use `UartRx<'static, Async>`, NOT `UartRx<'static, UART0>`
+
+### USB PID Allocation
+- Pico Logger: 0x000a
+- Ground Station: 0x000b
 
 ## Related Skills
 
-- `pico-logger`: Telemetry source
-- `flight-computer`: Intermediate processor
+- `pico-logger`: Same board, similar Embassy patterns
+- `embassy-rp`: Embassy HAL for RP2040
+- `pico-tooling`: Flashing and serial monitoring

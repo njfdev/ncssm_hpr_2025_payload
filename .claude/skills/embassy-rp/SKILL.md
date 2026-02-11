@@ -166,6 +166,13 @@ bind_interrupts!(struct Irqs {
 });
 ```
 
+## Key Gotchas
+
+### UART Types (v0.9.0)
+- `UartTx<'d, M: Mode>` and `UartRx<'d, M: Mode>` generic is `Mode` (Async/Blocking), **not** the peripheral type
+- For async task functions use `UartRx<'static, Async>`, NOT `UartRx<'static, UART0>`
+- `Uart::new()` requires an interrupt binding even for DMA mode
+
 ## Flashing
 
 ```bash
