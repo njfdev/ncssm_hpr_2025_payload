@@ -12,7 +12,7 @@ use embassy_rp::uart::{self, Uart, Config as UartConfig};
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::UsbDevice;
-use embassy_time::Timer;
+use embassy_time::{Timer, Duration, with_timeout};
 use embassy_futures::select::{select, Either};
 use static_cell::StaticCell;
 use panic_probe as _;
@@ -177,10 +177,11 @@ async fn main(spawner: Spawner) {
                         }
                         Either::First(Ok(_)) => {} // empty packet
                         Either::First(Err(_)) => break 'connected,
-                        // UART data received - forward to USB
+                        // UART data received - forward to USB (with timeout to prevent stalling)
                         Either::Second(packet) => {
-                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
-                                break 'connected;
+                            match with_timeout(Duration::from_millis(500), class.write_packet(&packet.buf[..packet.len])).await {
+                                Ok(Ok(())) => {}
+                                _ => break 'connected,
                             }
                         }
                     }
@@ -218,9 +219,10 @@ async fn main(spawner: Spawner) {
                         Either::First(Ok(_)) => {}
                         Either::First(Err(_)) => break 'connected,
                         Either::Second(packet) => {
-                            // Forward UART -> USB
-                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
-                                break 'connected;
+                            // Forward UART -> USB (with timeout)
+                            match with_timeout(Duration::from_millis(500), class.write_packet(&packet.buf[..packet.len])).await {
+                                Ok(Ok(())) => {}
+                                _ => break 'connected,
                             }
                         }
                     }
@@ -267,9 +269,10 @@ async fn main(spawner: Spawner) {
                         Either::First(Ok(_)) => {}
                         Either::First(Err(_)) => break 'connected,
                         Either::Second(packet) => {
-                            // Forward AT responses to USB
-                            if class.write_packet(&packet.buf[..packet.len]).await.is_err() {
-                                break 'connected;
+                            // Forward AT responses to USB (with timeout)
+                            match with_timeout(Duration::from_millis(500), class.write_packet(&packet.buf[..packet.len])).await {
+                                Ok(Ok(())) => {}
+                                _ => break 'connected,
                             }
                         }
                     }
