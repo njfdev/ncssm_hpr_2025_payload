@@ -7,7 +7,6 @@ MEMORY {
 EXTERN(BOOT2_FIRMWARE)
 
 SECTIONS {
-    /* ### Boot loader */
     .boot2 ORIGIN(BOOT2) :
     {
         KEEP(*(.boot2));
@@ -15,10 +14,6 @@ SECTIONS {
 } INSERT BEFORE .text;
 
 SECTIONS {
-    /* ### Picotool 'Binary Info' Entries
-     *
-     * Picotool looks through this block to find interesting information.
-     */
     .bi_entries : ALIGN(4)
     {
         __bi_entries_start = .;
