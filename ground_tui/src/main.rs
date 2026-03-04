@@ -26,6 +26,9 @@ struct Cli {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    // Parse baud rate from addr for max bandwidth display
+    let baud = parse_baud(&cli.addr);
+
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -44,13 +47,13 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = TelemetryState::new();
+    let mut state = TelemetryState::new(baud);
 
     // Main loop — 10 Hz redraw
     loop {
         // Drain all pending messages
-        while let Ok(msg) = rx.try_recv() {
-            state.update(&msg);
+        while let Ok((header, msg)) = rx.try_recv() {
+            state.update(&header, &msg);
         }
 
         // Render
@@ -74,4 +77,15 @@ fn main() -> io::Result<()> {
     io::stdout().execute(LeaveAlternateScreen)?;
 
     Ok(())
+}
+
+/// Extract baud rate from addr string like "serial:/dev/ttyUSB0:57600"
+fn parse_baud(addr: &str) -> u32 {
+    if addr.starts_with("serial:") {
+        addr.rsplit(':').next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    } else {
+        0
+    }
 }

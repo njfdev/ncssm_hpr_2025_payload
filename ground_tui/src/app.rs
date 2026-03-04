@@ -1,6 +1,10 @@
 use std::time::Instant;
 
 use mavlink::ardupilotmega::*;
+use mavlink::MavHeader;
+
+/// MAVLink v2 overhead: 10 header + 2 CRC = 12 bytes per message
+const MAVLINK_V2_OVERHEAD: usize = 12;
 
 pub struct TelemetryState {
     // GPS
@@ -44,13 +48,34 @@ pub struct TelemetryState {
     pub last_heartbeat: Option<Instant>,
     pub msg_rate: f32,
 
+    // Bandwidth
+    pub bytes_per_sec: f32,
+    pub max_bytes_per_sec: f32,
+
+    // Packet loss
+    pub packet_loss_pct: f32,
+    pub total_expected: u64,
+    pub total_lost: u64,
+
     // Rate tracking
     rate_window_start: Instant,
     rate_window_count: u64,
+    rate_window_bytes: u64,
+
+    // Sequence tracking (per system_id)
+    last_seq: Option<u8>,
+    seq_initialized: bool,
 }
 
 impl TelemetryState {
-    pub fn new() -> Self {
+    pub fn new(max_baud: u32) -> Self {
+        // Effective byte rate: baud / 10 (8N1 = 10 bits per byte)
+        let max_bytes = if max_baud > 0 {
+            max_baud as f32 / 10.0
+        } else {
+            0.0
+        };
+
         Self {
             lat: 0.0,
             lon: 0.0,
@@ -86,15 +111,29 @@ impl TelemetryState {
             last_heartbeat: None,
             msg_rate: 0.0,
 
+            bytes_per_sec: 0.0,
+            max_bytes_per_sec: max_bytes,
+
+            packet_loss_pct: 0.0,
+            total_expected: 0,
+            total_lost: 0,
+
             rate_window_start: Instant::now(),
             rate_window_count: 0,
+            rate_window_bytes: 0,
+
+            last_seq: None,
+            seq_initialized: false,
         }
     }
 
-    pub fn update(&mut self, msg: &MavMessage) {
+    pub fn update(&mut self, header: &MavHeader, msg: &MavMessage) {
         self.msg_count += 1;
         self.connected = true;
-        self.update_rate();
+
+        let msg_bytes = payload_size(msg) + MAVLINK_V2_OVERHEAD;
+        self.update_rate(msg_bytes as u64);
+        self.update_packet_loss(header.sequence);
 
         match msg {
             MavMessage::HEARTBEAT(data) => {
@@ -160,17 +199,66 @@ impl TelemetryState {
         }
     }
 
-    fn update_rate(&mut self) {
+    fn update_rate(&mut self, bytes: u64) {
         self.rate_window_count += 1;
+        self.rate_window_bytes += bytes;
         let elapsed = self.rate_window_start.elapsed().as_secs_f32();
         if elapsed >= 1.0 {
             self.msg_rate = self.rate_window_count as f32 / elapsed;
+            self.bytes_per_sec = self.rate_window_bytes as f32 / elapsed;
             self.rate_window_start = Instant::now();
             self.rate_window_count = 0;
+            self.rate_window_bytes = 0;
+        }
+    }
+
+    fn update_packet_loss(&mut self, seq: u8) {
+        if !self.seq_initialized {
+            self.last_seq = Some(seq);
+            self.seq_initialized = true;
+            return;
+        }
+
+        if let Some(last) = self.last_seq {
+            // Sequence is u8, wraps at 255 -> 0
+            let expected_next = last.wrapping_add(1);
+            if seq != expected_next {
+                // Count how many were skipped
+                let gap = seq.wrapping_sub(expected_next) as u64;
+                self.total_lost += gap;
+                self.total_expected += gap;
+            }
+            self.total_expected += 1;
+        }
+
+        self.last_seq = Some(seq);
+
+        if self.total_expected > 0 {
+            self.packet_loss_pct = (self.total_lost as f32 / self.total_expected as f32) * 100.0;
         }
     }
 
     pub fn heartbeat_age_secs(&self) -> Option<f32> {
         self.last_heartbeat.map(|t| t.elapsed().as_secs_f32())
+    }
+
+    pub fn bandwidth_pct(&self) -> f32 {
+        if self.max_bytes_per_sec > 0.0 {
+            (self.bytes_per_sec / self.max_bytes_per_sec) * 100.0
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Estimated payload size for known message types.
+fn payload_size(msg: &MavMessage) -> usize {
+    match msg {
+        MavMessage::HEARTBEAT(_) => 9,
+        MavMessage::GLOBAL_POSITION_INT(_) => 28,
+        MavMessage::SCALED_IMU(_) => 22,
+        MavMessage::SCALED_PRESSURE(_) => 14,
+        MavMessage::GPS_RAW_INT(_) => 30,
+        _ => 20, // reasonable default
     }
 }

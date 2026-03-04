@@ -164,12 +164,44 @@ fn system_panel(state: &TelemetryState) -> Paragraph<'_> {
         None => Color::DarkGray,
     };
 
+    // Bandwidth display
+    let bw_text = if state.max_bytes_per_sec > 0.0 {
+        format!(
+            "{:.0} / {:.0} B/s ({:.0}%)",
+            state.bytes_per_sec,
+            state.max_bytes_per_sec,
+            state.bandwidth_pct()
+        )
+    } else {
+        format!("{:.0} B/s", state.bytes_per_sec)
+    };
+    let bw_color = if state.bandwidth_pct() > 80.0 {
+        Color::Red
+    } else if state.bandwidth_pct() > 50.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    // Packet loss display
+    let loss_color = if state.packet_loss_pct > 5.0 {
+        Color::Red
+    } else if state.packet_loss_pct > 1.0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    let loss_text = format!(
+        "{:.1}% ({} lost)",
+        state.packet_loss_pct, state.total_lost
+    );
+
     Paragraph::new(vec![
         value_line("Status", conn_text.into(), conn_color),
-        value_line("Type", state.mav_type.clone(), Color::White),
-        value_line("State", state.system_status.clone(), Color::White),
         value_line("Heartbeat", hb_text, hb_color),
         value_line("Msg Rate", format!("{:.1} msg/s", state.msg_rate), Color::Cyan),
+        value_line("Bandwidth", bw_text, bw_color),
+        value_line("Pkt Loss", loss_text, loss_color),
         value_line("Total Msgs", format!("{}", state.msg_count), Color::White),
     ])
     .block(panel_block("System"))

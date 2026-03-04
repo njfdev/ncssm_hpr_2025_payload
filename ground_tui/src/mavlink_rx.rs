@@ -4,11 +4,11 @@ use std::thread;
 use std::time::Duration;
 
 use mavlink::ardupilotmega::MavMessage;
-use mavlink::MavConnection;
+use mavlink::{MavConnection, MavHeader};
 
 pub fn spawn_receiver(
     addr: &str,
-    tx: mpsc::Sender<MavMessage>,
+    tx: mpsc::Sender<(MavHeader, MavMessage)>,
 ) -> Arc<dyn MavConnection<MavMessage> + Send + Sync> {
     let conn = mavlink::connect::<MavMessage>(addr).expect("failed to connect to MAVLink");
     let conn = Arc::new(conn);
@@ -16,8 +16,8 @@ pub fn spawn_receiver(
     let recv_conn = conn.clone();
     thread::spawn(move || loop {
         match recv_conn.recv() {
-            Ok((_header, msg)) => {
-                if tx.send(msg).is_err() {
+            Ok((header, msg)) => {
+                if tx.send((header, msg)).is_err() {
                     break; // main thread dropped the receiver
                 }
             }
