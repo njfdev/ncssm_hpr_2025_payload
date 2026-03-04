@@ -1,7 +1,10 @@
 [package]
-name = "flight_computer"
+name = "ground_tui"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 mavlink = { version = "0.17", features = ["ardupilotmega", "udp"] }
+ratatui = "0.29"
+crossterm = "0.28"
+clap = { version = "4", features = ["derive"] }
