@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for the ground station","local":true,"windows":["*"],"permissions":["core:default","dialog:default"]}}

@@ -1,0 +1,243 @@
+:root {
+  --bg: #1a1a2e;
+  --panel-bg: #16213e;
+  --panel-border: #0f3460;
+  --text: #e0e0e0;
+  --text-dim: #888;
+  --accent: #00d4ff;
+  --red: #ff4444;
+  --green: #44ff44;
+  --blue: #4488ff;
+  --yellow: #ffcc00;
+  --cyan: #00ffcc;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+  font-size: 13px;
+  background: var(--bg);
+  color: var(--text);
+  overflow-x: hidden;
+}
+
+/* Connection bar */
+#connection-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #0d1117;
+  border-bottom: 1px solid var(--panel-border);
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.conn-left, .conn-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#port-select {
+  background: var(--panel-bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+#addr-input {
+  background: var(--panel-bg);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  width: 240px;
+}
+
+button {
+  background: var(--panel-border);
+  color: var(--text);
+  border: 1px solid #1a4a8a;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+button:hover:not(:disabled) {
+  background: #1a4a8a;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#refresh-ports {
+  padding: 4px 8px;
+  font-size: 14px;
+}
+
+#status-indicator {
+  font-size: 12px;
+  font-weight: bold;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.status-disconnected {
+  color: var(--red);
+}
+
+.status-connected {
+  color: var(--green);
+}
+
+.logging {
+  background: var(--red) !important;
+  color: #fff !important;
+  border-color: var(--red) !important;
+}
+
+/* Main layout */
+main {
+  padding: 8px;
+}
+
+/* Panels grid: 3 columns x 2 rows */
+#panels {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: auto auto;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.panel {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.panel h3 {
+  background: var(--panel-border);
+  padding: 4px 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+}
+
+.panel-body {
+  padding: 8px 10px;
+}
+
+.field {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  line-height: 1.6;
+}
+
+.label {
+  color: var(--text-dim);
+}
+
+.val-red { color: var(--red); }
+.val-green { color: var(--green); }
+.val-blue { color: var(--blue); }
+.val-yellow { color: var(--yellow); }
+.val-cyan { color: var(--cyan); }
+
+/* Cursor banner — spans full grid width */
+.cursor-banner {
+  grid-column: 1 / -1;
+  background: rgba(0, 212, 255, 0.12);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: var(--accent);
+  text-align: center;
+}
+
+/* Charts grid: 2 columns x 2 rows */
+#charts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto;
+  gap: 8px;
+}
+
+.chart-box {
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.chart-box h3 {
+  background: var(--panel-border);
+  padding: 4px 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent);
+}
+
+.chart-container {
+  height: 180px;
+  padding: 4px;
+}
+
+/* uPlot overrides for dark theme */
+.u-wrap {
+  background: transparent !important;
+}
+
+.u-legend {
+  font-size: 11px !important;
+  color: var(--text-dim) !important;
+}
+
+.u-legend .u-marker {
+  width: 8px !important;
+  height: 8px !important;
+}
+
+.u-legend th {
+  color: var(--text-dim) !important;
+  font-weight: normal !important;
+}
+
+.u-legend td {
+  color: var(--text) !important;
+}
+
+/* Cursor crosshair lines */
+.u-cursor-x {
+  border-left: 1px dashed rgba(0, 212, 255, 0.5) !important;
+}
+
+.u-cursor-y {
+  border-top: 1px dashed rgba(0, 212, 255, 0.5) !important;
+}
+
+/* Selection rectangle for drag-to-zoom */
+.u-select {
+  background: rgba(0, 212, 255, 0.08) !important;
+  border: 1px solid rgba(0, 212, 255, 0.25) !important;
+}

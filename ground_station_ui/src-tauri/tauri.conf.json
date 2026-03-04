@@ -1,0 +1,24 @@
+{
+  "productName": "NCSSM Ground Station",
+  "version": "0.1.0",
+  "identifier": "com.ncssm.ground-station",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "NCSSM HPR Ground Station",
+        "width": 1280,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

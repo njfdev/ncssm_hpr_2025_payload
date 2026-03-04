@@ -1,0 +1,9 @@
+{
+  "identifier": "default",
+  "description": "Default capabilities for the ground station",
+  "windows": ["*"],
+  "permissions": [
+    "core:default",
+    "dialog:default"
+  ]
+}
