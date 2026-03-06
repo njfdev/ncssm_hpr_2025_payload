@@ -15,7 +15,7 @@ export default function ConnectionBar({ connected, onConnect, onDisconnect }) {
 
   const handlePortChange = (e) => {
     if (e.target.value) {
-      setAddr("serial:" + e.target.value + ":57600");
+      setAddr("serial:" + e.target.value + ":115200");
     }
   };
 

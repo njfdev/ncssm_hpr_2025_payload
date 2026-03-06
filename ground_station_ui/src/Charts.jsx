@@ -3,6 +3,8 @@ import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 
 const n = (v) => (v ?? 0);
+const MAX_DATA_POINTS = 60000; // ~50 min at 20Hz — memory cap
+const PLOT_HEIGHT = 150;
 
 function emptyData(numSeries) {
   const d = [[]];
@@ -10,9 +12,12 @@ function emptyData(numSeries) {
   return d;
 }
 
-function pushPoint(data, t, values) {
+function pushPoint(data, t, values, maxPoints) {
   data[0].push(t);
   for (let i = 0; i < values.length; i++) data[i + 1].push(values[i]);
+  while (data[0].length > maxPoints) {
+    for (let i = 0; i < data.length; i++) data[i].shift();
+  }
 }
 
 const CHART_DEFS = [
@@ -59,39 +64,90 @@ const CHART_DEFS = [
   },
 ];
 
-function makeOpts(width, height, seriesDefs, hooks) {
+function makeOpts(width, seriesDefs, hooks) {
   return {
     width,
-    height,
+    height: PLOT_HEIGHT,
     cursor: {
       sync: { key: "telemetry" },
       drag: { x: true, y: false },
+      points: { show: true, size: 6 },
     },
     select: { show: true },
     legend: { show: true, live: true },
     scales: { x: { time: false } },
     axes: [
-      { stroke: "#666", grid: { stroke: "#333", width: 1 }, ticks: { stroke: "#444" }, font: "10px monospace" },
-      { stroke: "#666", grid: { stroke: "#333", width: 1 }, ticks: { stroke: "#444" }, font: "10px monospace" },
+      {
+        stroke: "#666",
+        grid: { stroke: "#333", width: 1 },
+        ticks: { stroke: "#444" },
+        font: "10px monospace",
+        size: 30,
+      },
+      {
+        stroke: "#666",
+        grid: { stroke: "#333", width: 1 },
+        ticks: { stroke: "#444" },
+        font: "10px monospace",
+        size: 55,
+      },
     ],
     series: [{ label: "Time (s)" }, ...seriesDefs],
     hooks,
   };
 }
 
-const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
+const Charts = forwardRef(function Charts(
+  { windowSec, isLive, onCursorMove, onPan, onGoLive, onTimeRange },
+  ref
+) {
   const containerRefs = useRef({});
   const chartsMap = useRef({});
   const dataArrays = useRef({});
   const onCursorMoveRef = useRef(onCursorMove);
+  const onPanRef = useRef(onPan);
+  const onGoLiveRef = useRef(onGoLive);
+  const onTimeRangeRef = useRef(onTimeRange);
+  const windowSecRef = useRef(windowSec);
+  const isLiveRef = useRef(isLive);
   const cursorRafRef = useRef(null);
+  const loggingRef = useRef(false);
 
-  // Keep callback ref in sync without triggering effect re-runs
   useEffect(() => { onCursorMoveRef.current = onCursorMove; });
+  useEffect(() => { onPanRef.current = onPan; });
+  useEffect(() => { onGoLiveRef.current = onGoLive; });
+  useEffect(() => { onTimeRangeRef.current = onTimeRange; });
+  useEffect(() => { windowSecRef.current = windowSec; }, [windowSec]);
+  useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
 
-  // Create all uPlot instances once on mount
+  // When windowSec or isLive change externally, update chart scales
+  useEffect(() => {
+    if (!isLive) return;
+    const allCharts = chartsMap.current;
+    for (const def of CHART_DEFS) {
+      const chart = allCharts[def.id];
+      const data = dataArrays.current[def.id];
+      if (!chart || !data || data[0].length === 0) continue;
+      const latest = data[0][data[0].length - 1];
+      if (windowSec === Infinity) {
+        chart.setScale("x", { min: data[0][0], max: latest });
+      } else {
+        chart.setScale("x", { min: latest - windowSec, max: latest });
+      }
+    }
+  }, [windowSec, isLive]);
+
   useEffect(() => {
     const allCharts = chartsMap.current;
+
+    const reportTimeRange = () => {
+      // Report from first chart's x-scale
+      const firstChart = allCharts[CHART_DEFS[0]?.id];
+      if (firstChart) {
+        const scales = firstChart.scales.x;
+        onTimeRangeRef.current?.({ min: scales.min, max: scales.max });
+      }
+    };
 
     const sharedHooks = {
       setCursor: [(u) => {
@@ -99,7 +155,6 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
         const time = (idx != null && u.data[0] && idx < u.data[0].length)
           ? u.data[0][idx]
           : null;
-        // Deduplicate via rAF — synced charts fire 4x per mouse-move
         if (cursorRafRef.current) cancelAnimationFrame(cursorRafRef.current);
         cursorRafRef.current = requestAnimationFrame(() => {
           onCursorMoveRef.current?.(time);
@@ -113,6 +168,11 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
           chart.setScale("x", { min, max });
         }
         u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+        onPanRef.current?.();
+        reportTimeRange();
+      }],
+      setScale: [(_u, _key) => {
+        reportTimeRange();
       }],
     };
 
@@ -120,21 +180,54 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
       const el = containerRefs.current[def.id];
       if (!el) continue;
       const w = el.clientWidth - 8;
-      const h = el.clientHeight - 4;
       const data = emptyData(def.numSeries);
       dataArrays.current[def.id] = data;
-      const chart = new uPlot(makeOpts(w, h, def.series, sharedHooks), data, el);
+      const chart = new uPlot(makeOpts(w, def.series, sharedHooks), data, el);
       allCharts[def.id] = chart;
 
-      // Double-click resets zoom on all charts
+      // Double-click → go live
       chart.over.addEventListener("dblclick", () => {
-        for (const c of Object.values(allCharts)) {
-          const d = c.data[0];
-          if (d && d.length > 0) {
-            c.setScale("x", { min: d[0], max: d[d.length - 1] });
-          }
-        }
+        onGoLiveRef.current?.();
       });
+
+      // Mouse wheel → pan horizontally
+      chart.over.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const wSec = windowSecRef.current;
+        if (wSec === Infinity) return; // can't pan when showing all
+
+        // Determine current visible range from this chart
+        const xMin = chart.scales.x.min;
+        const xMax = chart.scales.x.max;
+        const range = xMax - xMin;
+        const shift = range * 0.1 * Math.sign(e.deltaY || e.deltaX);
+
+        // Clamp: don't pan before start of data
+        const data = dataArrays.current[CHART_DEFS[0].id];
+        if (!data || data[0].length === 0) return;
+        const dataMin = data[0][0];
+        const dataMax = data[0][data[0].length - 1];
+
+        let newMin = xMin + shift;
+        let newMax = xMax + shift;
+
+        // Clamp to data bounds
+        if (newMin < dataMin) {
+          newMin = dataMin;
+          newMax = dataMin + range;
+        }
+        if (newMax > dataMax) {
+          newMax = dataMax;
+          newMin = dataMax - range;
+          if (newMin < dataMin) newMin = dataMin;
+        }
+
+        for (const c of Object.values(allCharts)) {
+          c.setScale("x", { min: newMin, max: newMax });
+        }
+
+        onPanRef.current?.();
+      }, { passive: false });
     }
 
     const handleResize = () => {
@@ -142,7 +235,7 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
         const el = containerRefs.current[def.id];
         const chart = allCharts[def.id];
         if (el && chart) {
-          chart.setSize({ width: el.clientWidth - 8, height: el.clientHeight - 4 });
+          chart.setSize({ width: el.clientWidth - 8, height: PLOT_HEIGHT });
         }
       }
     };
@@ -158,11 +251,26 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
   useImperativeHandle(ref, () => ({
     push(snapshot) {
       const t = snapshot.timestamp_ms / 1000;
+      const maxPts = loggingRef.current ? Infinity : MAX_DATA_POINTS;
       for (const def of CHART_DEFS) {
         const data = dataArrays.current[def.id];
         if (!data) continue;
-        pushPoint(data, t, def.extract(snapshot));
+        pushPoint(data, t, def.extract(snapshot), maxPts);
         chartsMap.current[def.id]?.setData(data);
+      }
+      // Auto-scroll when live
+      if (isLiveRef.current) {
+        const wSec = windowSecRef.current;
+        for (const def of CHART_DEFS) {
+          const chart = chartsMap.current[def.id];
+          const data = dataArrays.current[def.id];
+          if (!chart || !data || data[0].length === 0) continue;
+          if (wSec === Infinity) {
+            chart.setScale("x", { min: data[0][0], max: t });
+          } else {
+            chart.setScale("x", { min: t - wSec, max: t });
+          }
+        }
       }
     },
     clear() {
@@ -184,6 +292,9 @@ const Charts = forwardRef(function Charts({ onCursorMove }, ref) {
         dataArrays.current[def.id] = data;
         chartsMap.current[def.id]?.setData(data);
       }
+    },
+    setLogging(val) {
+      loggingRef.current = val;
     },
   }), []);
 

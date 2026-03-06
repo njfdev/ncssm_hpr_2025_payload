@@ -37,7 +37,7 @@ pub fn spawn_receiver(
                         let mut st = state.lock().unwrap();
                         st.update(&header, &msg);
 
-                        if last_emit.elapsed() >= Duration::from_millis(100) {
+                        if last_emit.elapsed() >= Duration::from_millis(50) {
                             Some(st.snapshot())
                         } else {
                             None

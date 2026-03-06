@@ -10,7 +10,7 @@ fn main() {
     let addr = args
         .get(1)
         .map(|s| s.as_str())
-        .unwrap_or("serial:/dev/ttyUSB0:57600");
+        .unwrap_or("serial:/dev/ttyUSB0:115200");
 
     println!("Connecting to {addr}...");
     let conn = mavlink::connect::<MavMessage>(addr).expect("failed to connect");
@@ -45,7 +45,7 @@ fn main() {
     let start = Instant::now();
     let mut seq: u32 = 0;
 
-    println!("Sending heartbeat + telemetry at 4 Hz. Ctrl-C to stop.");
+    println!("Sending heartbeat + telemetry at 20 Hz. Ctrl-C to stop.");
 
     loop {
         let elapsed = start.elapsed();
@@ -125,6 +125,6 @@ fn main() {
         );
 
         seq += 1;
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(50));
     }
 }

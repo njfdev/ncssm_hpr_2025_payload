@@ -7,7 +7,7 @@ IP="${1:-172.31.255.248}"
 USER="${2:-orangepi}"
 PASS="${3:-orangepi}"
 UART="${4:-/dev/ttyAS7}"
-BAUD="${5:-57600}"
+BAUD="${5:-115200}"
 
 SSH="sshpass -p $PASS ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no $USER@$IP"
 

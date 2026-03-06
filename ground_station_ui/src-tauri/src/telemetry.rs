@@ -68,6 +68,9 @@ pub struct TelemetryState {
     last_seq: Option<u8>,
     seq_initialized: bool,
 
+    // Remote time from flight computer (ms since boot)
+    remote_time_boot_ms: Option<u32>,
+
     // Session timing
     session_start: Instant,
 }
@@ -180,6 +183,8 @@ impl TelemetryState {
             last_seq: None,
             seq_initialized: false,
 
+            remote_time_boot_ms: None,
+
             session_start: Instant::now(),
         }
     }
@@ -200,6 +205,7 @@ impl TelemetryState {
             }
 
             MavMessage::GLOBAL_POSITION_INT(data) => {
+                self.remote_time_boot_ms = Some(data.time_boot_ms);
                 self.lat = data.lat as f64 / 1e7;
                 self.lon = data.lon as f64 / 1e7;
                 self.fused_alt = data.alt as f64 / 1000.0;
@@ -208,6 +214,7 @@ impl TelemetryState {
             }
 
             MavMessage::SCALED_IMU(data) => {
+                self.remote_time_boot_ms = Some(data.time_boot_ms);
                 self.accel_x = data.xacc as f32 / 1000.0;
                 self.accel_y = data.yacc as f32 / 1000.0;
                 self.accel_z = data.zacc as f32 / 1000.0;
@@ -220,6 +227,7 @@ impl TelemetryState {
             }
 
             MavMessage::SCALED_PRESSURE(data) => {
+                self.remote_time_boot_ms = Some(data.time_boot_ms);
                 self.pressure_hpa = data.press_abs;
                 self.temperature_c = data.temperature as f32 / 100.0;
                 if data.press_abs > 0.0 {
@@ -253,9 +261,14 @@ impl TelemetryState {
     }
 
     /// Create a serializable snapshot of the current state.
+    /// Uses the flight computer's time_boot_ms when available for jitter-free timestamps.
     pub fn snapshot(&self) -> TelemetrySnapshot {
+        let timestamp_ms = match self.remote_time_boot_ms {
+            Some(t) => t as u64,
+            None => self.session_start.elapsed().as_millis() as u64,
+        };
         TelemetrySnapshot {
-            timestamp_ms: self.session_start.elapsed().as_millis() as u64,
+            timestamp_ms,
 
             lat: self.lat,
             lon: self.lon,

@@ -31,24 +31,26 @@ function bwDisplay(bps, pct) {
   return { text, color };
 }
 
+function maxBwDisplay(maxBps) {
+  maxBps = n(maxBps);
+  if (maxBps <= 0) return { text: "N/A", color: "var(--text-dim)" };
+  const text = maxBps < 1024 ? maxBps.toFixed(0) + " B/s" : (maxBps / 1024).toFixed(1) + " KB/s";
+  return { text, color: "var(--text)" };
+}
+
 function lossColor(pct) {
   if (pct > 5) return "var(--red)";
   if (pct > 1) return "var(--yellow)";
   return "var(--green)";
 }
 
-const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s, cursorActive, cursorTimeSec }) {
+const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
   const hb = hbDisplay(s.heartbeat_age_secs);
   const bw = bwDisplay(s.bytes_per_sec, s.bandwidth_pct);
+  const maxBw = maxBwDisplay(s.max_bytes_per_sec);
 
   return (
     <section id="panels">
-      {cursorActive && (
-        <div className="cursor-banner">
-          Viewing T+{n(cursorTimeSec).toFixed(1)}s &mdash; move cursor off chart for live data
-        </div>
-      )}
-
       {/* GPS */}
       <div className="panel">
         <h3>GPS</h3>
@@ -114,6 +116,7 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s, cursorActiv
           <Field label="Heartbeat:" value={hb.text} color={hb.color} />
           <Field label="Msg Rate:" value={n(s.msg_rate).toFixed(1) + " msg/s"} />
           <Field label="Bandwidth:" value={bw.text} color={bw.color} />
+          <Field label="Max BW:" value={maxBw.text} color={maxBw.color} />
           <Field label="Pkt Loss:" value={n(s.packet_loss_pct).toFixed(2) + "%"} color={lossColor(n(s.packet_loss_pct))} />
           <Field label="Total Msgs:" value={n(s.msg_count)} />
         </div>

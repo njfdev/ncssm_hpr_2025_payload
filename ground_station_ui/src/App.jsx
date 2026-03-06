@@ -3,8 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ConnectionBar from "./ConnectionBar.jsx";
 import TelemetryPanels from "./TelemetryPanels.jsx";
+import ChartControls from "./ChartControls.jsx";
 import Charts from "./Charts.jsx";
 import SessionControls from "./SessionControls.jsx";
+
+const MAX_ROLLING = 60000; // ~50 min at 20Hz
 
 export const EMPTY_SNAPSHOT = {
   timestamp_ms: 0,
@@ -25,21 +28,26 @@ export default function App() {
   const [cursorSnapshot, setCursorSnapshot] = useState(null);
   const [connected, setConnected] = useState(false);
   const [logging, setLogging] = useState(false);
+  const [windowSec, setWindowSec] = useState(30);
+  const [isLive, setIsLive] = useState(true);
+  const [timeRange, setTimeRange] = useState(null);
   const chartsRef = useRef(null);
   const snapshotsRef = useRef([]);
   const loggingRef = useRef(false);
 
   useEffect(() => { loggingRef.current = logging; }, [logging]);
 
-  // Listen for telemetry events from the Rust backend
+  // Listen for telemetry events
   useEffect(() => {
     const unlisten = listen("telemetry", (event) => {
       const s = { ...EMPTY_SNAPSHOT, ...event.payload };
       setSnapshot(s);
-      // Only accumulate chart data and snapshots while logging
-      if (loggingRef.current) {
-        snapshotsRef.current.push(s);
-        chartsRef.current?.push(s);
+
+      chartsRef.current?.push(s);
+
+      snapshotsRef.current.push(s);
+      if (!loggingRef.current && snapshotsRef.current.length > MAX_ROLLING) {
+        snapshotsRef.current.shift();
       }
     });
     return () => { unlisten.then((fn) => fn()); };
@@ -61,10 +69,12 @@ export default function App() {
     if (!loggingRef.current) {
       snapshotsRef.current = [];
       chartsRef.current?.clear();
+      chartsRef.current?.setLogging(true);
       await invoke("start_logging");
       setLogging(true);
     } else {
       await invoke("stop_logging");
+      chartsRef.current?.setLogging(false);
       setLogging(false);
     }
   }, []);
@@ -75,9 +85,11 @@ export default function App() {
     if (snapshots.length > 0) {
       setSnapshot({ ...EMPTY_SNAPSHOT, ...snapshots[snapshots.length - 1] });
     }
+    // Show all data when loading a session
+    setWindowSec(Infinity);
+    setIsLive(false);
   }, []);
 
-  // Called by Charts when the cursor moves over data
   const handleCursorMove = useCallback((timeSec) => {
     if (timeSec == null) {
       setCursorSnapshot(null);
@@ -87,7 +99,6 @@ export default function App() {
     if (snaps.length === 0) { setCursorSnapshot(null); return; }
 
     const targetMs = timeSec * 1000;
-    // Binary search for closest timestamp
     let lo = 0, hi = snaps.length - 1;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
@@ -101,6 +112,23 @@ export default function App() {
       if (dPrev < dLo) best = lo - 1;
     }
     setCursorSnapshot(snaps[best]);
+  }, []);
+
+  const handlePan = useCallback(() => {
+    setIsLive(false);
+  }, []);
+
+  const handleGoLive = useCallback(() => {
+    setIsLive(true);
+  }, []);
+
+  const handleWindowChange = useCallback((sec) => {
+    setWindowSec(sec);
+    setIsLive(true);
+  }, []);
+
+  const handleTimeRange = useCallback((range) => {
+    setTimeRange(range);
   }, []);
 
   const displaySnapshot = cursorSnapshot ?? snapshot;
@@ -119,13 +147,31 @@ export default function App() {
           onSessionLoaded={handleSessionLoaded}
         />
       </header>
+
+      <div className={`cursor-banner${cursorSnapshot != null ? " visible" : ""}`}>
+        {cursorSnapshot != null
+          ? `Viewing T+${(cursorSnapshot.timestamp_ms / 1000).toFixed(1)}s \u2014 move cursor off chart for live data`
+          : "\u00A0"}
+      </div>
+
       <main>
-        <TelemetryPanels
-          snapshot={displaySnapshot}
-          cursorActive={cursorSnapshot != null}
-          cursorTimeSec={cursorSnapshot ? cursorSnapshot.timestamp_ms / 1000 : null}
+        <TelemetryPanels snapshot={displaySnapshot} />
+        <ChartControls
+          windowSec={windowSec}
+          isLive={isLive}
+          timeRange={timeRange}
+          onWindowChange={handleWindowChange}
+          onGoLive={handleGoLive}
         />
-        <Charts ref={chartsRef} onCursorMove={handleCursorMove} />
+        <Charts
+          ref={chartsRef}
+          windowSec={windowSec}
+          isLive={isLive}
+          onCursorMove={handleCursorMove}
+          onPan={handlePan}
+          onGoLive={handleGoLive}
+          onTimeRange={handleTimeRange}
+        />
       </main>
     </>
   );
