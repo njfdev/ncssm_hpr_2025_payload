@@ -98,7 +98,7 @@ function makeOpts(width, seriesDefs, hooks) {
 }
 
 const Charts = forwardRef(function Charts(
-  { windowSec, isLive, onCursorMove, onPan, onGoLive, onTimeRange },
+  { windowSec, isLive, sessionBand, onCursorMove, onPan, onGoLive, onTimeRange },
   ref
 ) {
   const containerRefs = useRef({});
@@ -110,6 +110,7 @@ const Charts = forwardRef(function Charts(
   const onTimeRangeRef = useRef(onTimeRange);
   const windowSecRef = useRef(windowSec);
   const isLiveRef = useRef(isLive);
+  const sessionBandRef = useRef(sessionBand);
   const cursorRafRef = useRef(null);
   const loggingRef = useRef(false);
 
@@ -119,6 +120,16 @@ const Charts = forwardRef(function Charts(
   useEffect(() => { onTimeRangeRef.current = onTimeRange; });
   useEffect(() => { windowSecRef.current = windowSec; }, [windowSec]);
   useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
+  useEffect(() => { sessionBandRef.current = sessionBand; }, [sessionBand]);
+
+  // Redraw charts when sessionBand changes (to update band highlighting)
+  useEffect(() => {
+    for (const def of CHART_DEFS) {
+      const chart = chartsMap.current[def.id];
+      const data = dataArrays.current[def.id];
+      if (chart && data) chart.setData(data);
+    }
+  }, [sessionBand]);
 
   // When windowSec or isLive change externally, update chart scales
   useEffect(() => {
@@ -150,6 +161,44 @@ const Charts = forwardRef(function Charts(
     };
 
     const sharedHooks = {
+      draw: [(u) => {
+        const band = sessionBandRef.current;
+        if (!band) return;
+        const ctx = u.ctx;
+        const xMin = u.valToPos(band.minSec, "x", true);
+        const xMax = u.valToPos(band.maxSec, "x", true);
+        const plotLeft = u.bbox.left / devicePixelRatio;
+        const plotTop = u.bbox.top / devicePixelRatio;
+        const plotWidth = u.bbox.width / devicePixelRatio;
+        const plotHeight = u.bbox.height / devicePixelRatio;
+
+        // Clamp to plot area
+        const left = Math.max(xMin, plotLeft);
+        const right = Math.min(xMax, plotLeft + plotWidth);
+        if (right <= left) return;
+
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 212, 255, 0.06)";
+        ctx.fillRect(left, plotTop, right - left, plotHeight);
+
+        // Draw vertical edge lines
+        ctx.strokeStyle = "rgba(0, 212, 255, 0.3)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        if (xMin >= plotLeft && xMin <= plotLeft + plotWidth) {
+          ctx.beginPath();
+          ctx.moveTo(xMin, plotTop);
+          ctx.lineTo(xMin, plotTop + plotHeight);
+          ctx.stroke();
+        }
+        if (xMax >= plotLeft && xMax <= plotLeft + plotWidth) {
+          ctx.beginPath();
+          ctx.moveTo(xMax, plotTop);
+          ctx.lineTo(xMax, plotTop + plotHeight);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }],
       setCursor: [(u) => {
         const idx = u.cursor.idx;
         const time = (idx != null && u.data[0] && idx < u.data[0].length)
@@ -291,6 +340,13 @@ const Charts = forwardRef(function Charts(
         }
         dataArrays.current[def.id] = data;
         chartsMap.current[def.id]?.setData(data);
+        // Set x-scale to show all loaded data
+        if (data[0].length > 0) {
+          chartsMap.current[def.id]?.setScale("x", {
+            min: data[0][0],
+            max: data[0][data[0].length - 1],
+          });
+        }
       }
     },
     setLogging(val) {

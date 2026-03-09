@@ -18,11 +18,29 @@ const ChartControls = memo(function ChartControls({
   windowSec,
   isLive,
   timeRange,
+  loadedFileName,
+  logging,
   onWindowChange,
   onGoLive,
 }) {
+  let modeLabel;
+  let modeClass = "mode-indicator";
+  if (loadedFileName) {
+    modeLabel = `Session: ${loadedFileName}`;
+    modeClass += " mode-loaded";
+  } else if (logging) {
+    modeLabel = "Recording";
+    modeClass += " mode-recording";
+  } else {
+    modeLabel = "Live";
+    modeClass += " mode-live";
+  }
+
   return (
     <div className="chart-controls">
+      <div className="chart-controls-group">
+        <span className={modeClass}>{modeLabel}</span>
+      </div>
       <div className="chart-controls-group">
         <span className="chart-controls-label">Window:</span>
         {WINDOW_OPTIONS.map((opt) => (

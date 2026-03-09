@@ -49,6 +49,7 @@ fn connect(addr: String, state: State<'_, AppState>, app: tauri::AppHandle) -> R
 #[tauri::command]
 fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
     state.stop_flag.store(true, Ordering::Relaxed);
+    state.session.lock().unwrap().stop();
     *state.connected_addr.lock().unwrap() = None;
     Ok(())
 }

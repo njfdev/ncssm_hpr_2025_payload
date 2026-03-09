@@ -27,22 +27,32 @@ export default function App() {
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [cursorSnapshot, setCursorSnapshot] = useState(null);
   const [connected, setConnected] = useState(false);
+  const [collecting, setCollecting] = useState(false);
   const [logging, setLogging] = useState(false);
   const [windowSec, setWindowSec] = useState(30);
   const [isLive, setIsLive] = useState(true);
   const [timeRange, setTimeRange] = useState(null);
+  const [loadedFileName, setLoadedFileName] = useState(null);
+  // Session band: {minSec, maxSec} — the time range of a recorded or loaded session
+  const [sessionBand, setSessionBand] = useState(null);
   const chartsRef = useRef(null);
   const snapshotsRef = useRef([]);
+  const collectingRef = useRef(false);
   const loggingRef = useRef(false);
+  const logStartSecRef = useRef(null);
 
+  useEffect(() => { collectingRef.current = collecting; }, [collecting]);
   useEffect(() => { loggingRef.current = logging; }, [logging]);
 
   // Listen for telemetry events
   useEffect(() => {
     const unlisten = listen("telemetry", (event) => {
       const s = { ...EMPTY_SNAPSHOT, ...event.payload };
-      setSnapshot(s);
 
+      // Only feed data to charts/panels when collecting
+      if (!collectingRef.current) return;
+
+      setSnapshot(s);
       chartsRef.current?.push(s);
 
       snapshotsRef.current.push(s);
@@ -53,6 +63,18 @@ export default function App() {
     return () => { unlisten.then((fn) => fn()); };
   }, []);
 
+  // Clear loaded session state and prepare for live data
+  const clearLoadedSession = useCallback(() => {
+    if (loadedFileName) {
+      snapshotsRef.current = [];
+      chartsRef.current?.clear();
+      setLoadedFileName(null);
+      setSessionBand(null);
+      setWindowSec(30);
+      setIsLive(true);
+    }
+  }, [loadedFileName]);
+
   const handleConnect = useCallback(async (addr) => {
     await invoke("connect", { addr });
     setConnected(true);
@@ -61,31 +83,79 @@ export default function App() {
   const handleDisconnect = useCallback(async () => {
     await invoke("disconnect");
     setConnected(false);
+    if (loggingRef.current) {
+      try { await invoke("stop_logging"); } catch (_) {}
+    }
+    setCollecting(false);
+    setLogging(false);
     setSnapshot(EMPTY_SNAPSHOT);
     setCursorSnapshot(null);
   }, []);
 
+  const handleToggleCollecting = useCallback(() => {
+    if (!collectingRef.current) {
+      // Start collecting — clear loaded session if present
+      clearLoadedSession();
+      setCollecting(true);
+    } else {
+      // Pause — stop collecting and logging
+      if (loggingRef.current) {
+        invoke("stop_logging");
+        chartsRef.current?.setLogging(false);
+        setLogging(false);
+        // Record session band end
+        const snaps = snapshotsRef.current;
+        if (snaps.length > 0 && logStartSecRef.current != null) {
+          const endSec = snaps[snaps.length - 1].timestamp_ms / 1000;
+          setSessionBand({ minSec: logStartSecRef.current, maxSec: endSec });
+        }
+        logStartSecRef.current = null;
+      }
+      setCollecting(false);
+    }
+  }, [clearLoadedSession]);
+
   const handleToggleLogging = useCallback(async () => {
     if (!loggingRef.current) {
+      // Start logging: clear everything for a fresh session
+      clearLoadedSession();
       snapshotsRef.current = [];
       chartsRef.current?.clear();
       chartsRef.current?.setLogging(true);
+      setSessionBand(null);
+      logStartSecRef.current = null; // will be set on first data point
       await invoke("start_logging");
       setLogging(true);
+      setCollecting(true);
     } else {
+      // Stop logging
       await invoke("stop_logging");
       chartsRef.current?.setLogging(false);
       setLogging(false);
+      // Record session band
+      const snaps = snapshotsRef.current;
+      if (snaps.length > 0) {
+        const startSec = snaps[0].timestamp_ms / 1000;
+        const endSec = snaps[snaps.length - 1].timestamp_ms / 1000;
+        setSessionBand({ minSec: startSec, maxSec: endSec });
+      }
     }
-  }, []);
+  }, [clearLoadedSession]);
 
-  const handleSessionLoaded = useCallback((snapshots) => {
+  const handleSessionLoaded = useCallback((snapshots, fileName) => {
     snapshotsRef.current = snapshots.map((s) => ({ ...EMPTY_SNAPSHOT, ...s }));
     chartsRef.current?.loadSession(snapshotsRef.current);
     if (snapshots.length > 0) {
       setSnapshot({ ...EMPTY_SNAPSHOT, ...snapshots[snapshots.length - 1] });
+      const startSec = snapshots[0].timestamp_ms / 1000;
+      const endSec = snapshots[snapshots.length - 1].timestamp_ms / 1000;
+      setSessionBand({ minSec: startSec, maxSec: endSec });
+    } else {
+      setSessionBand(null);
     }
-    // Show all data when loading a session
+    setCursorSnapshot(null);
+    setCollecting(false);
+    setLoadedFileName(fileName);
     setWindowSec(Infinity);
     setIsLive(false);
   }, []);
@@ -142,7 +212,11 @@ export default function App() {
           onDisconnect={handleDisconnect}
         />
         <SessionControls
+          connected={connected}
+          collecting={collecting}
           logging={logging}
+          loadedFileName={loadedFileName}
+          onToggleCollecting={handleToggleCollecting}
           onToggleLogging={handleToggleLogging}
           onSessionLoaded={handleSessionLoaded}
         />
@@ -160,6 +234,8 @@ export default function App() {
           windowSec={windowSec}
           isLive={isLive}
           timeRange={timeRange}
+          loadedFileName={loadedFileName}
+          logging={logging}
           onWindowChange={handleWindowChange}
           onGoLive={handleGoLive}
         />
@@ -167,6 +243,7 @@ export default function App() {
           ref={chartsRef}
           windowSec={windowSec}
           isLive={isLive}
+          sessionBand={sessionBand}
           onCursorMove={handleCursorMove}
           onPan={handlePan}
           onGoLive={handleGoLive}
