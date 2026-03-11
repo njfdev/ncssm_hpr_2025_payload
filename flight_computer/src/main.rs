@@ -1,130 +1,259 @@
-use std::sync::Arc;
+mod camera;
+mod config;
+mod frame_sender;
+
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use mavlink::ardupilotmega::*;
-use mavlink::MavConnection;
+use mavlink::MavHeader;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let addr = args
-        .get(1)
-        .map(|s| s.as_str())
-        .unwrap_or("serial:/dev/ttyUSB0:115200");
+use config::Config;
 
-    println!("Connecting to {addr}...");
-    let conn = mavlink::connect::<MavMessage>(addr).expect("failed to connect");
-    let conn = Arc::new(conn);
+/// Token bucket rate limiter to prevent overdriving the radio link.
+struct RateLimiter {
+    max_bytes_per_sec: f64,
+    tokens: f64,
+    last_refill: Instant,
+}
 
-    // Receive thread — print anything that comes back
-    let recv_conn = conn.clone();
-    thread::spawn(move || loop {
-        match recv_conn.recv() {
-            Ok((header, msg)) => {
-                println!("rx [sys={} comp={}]: {msg:?}", header.system_id, header.component_id);
-            }
-            Err(mavlink::error::MessageReadError::Io(e))
-                if e.kind() == std::io::ErrorKind::WouldBlock =>
-            {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(e) => {
-                eprintln!("recv error: {e:?}");
-                thread::sleep(Duration::from_millis(100));
-            }
+impl RateLimiter {
+    fn new(max_bytes_per_sec: u32) -> Self {
+        Self {
+            max_bytes_per_sec: max_bytes_per_sec as f64,
+            // Start with a small burst allowance (one full tick)
+            tokens: max_bytes_per_sec as f64 * 0.1,
+            last_refill: Instant::now(),
         }
-    });
+    }
 
-    // Send loop — heartbeat + telemetry at 4 Hz
-    let header = mavlink::MavHeader {
-        system_id: 1,
-        component_id: 1,
-        sequence: 0,
+    /// Wait until we have enough tokens for `bytes` bytes, then consume them.
+    fn consume(&mut self, bytes: usize) {
+        let cost = bytes as f64;
+
+        // Refill tokens based on elapsed time
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_refill).as_secs_f64();
+        self.last_refill = now;
+        self.tokens += dt * self.max_bytes_per_sec;
+
+        // Cap tokens to 1 second of burst
+        if self.tokens > self.max_bytes_per_sec {
+            self.tokens = self.max_bytes_per_sec;
+        }
+
+        // If not enough tokens, sleep until we have them
+        if self.tokens < cost {
+            let deficit = cost - self.tokens;
+            let wait = Duration::from_secs_f64(deficit / self.max_bytes_per_sec);
+            thread::sleep(wait);
+            self.tokens = 0.0;
+            self.last_refill = Instant::now();
+        } else {
+            self.tokens -= cost;
+        }
+    }
+}
+
+/// Shared serial port + sequence counter + rate limiter for MAVLink writes.
+pub struct MavSerial {
+    port: Mutex<Box<dyn serialport::SerialPort>>,
+    sequence: AtomicU8,
+    rate_limiter: Mutex<RateLimiter>,
+    pub system_id: u8,
+    pub component_id: u8,
+}
+
+impl MavSerial {
+    /// Send a MAVLink v2 message with auto-incrementing sequence and rate limiting.
+    pub fn send(&self, msg: &MavMessage) -> Result<(), mavlink::error::MessageWriteError> {
+        // Estimate wire bytes: MAVLink v2 = 12 bytes overhead + payload
+        // ENCAPSULATED_DATA is 255 bytes payload, others are 9-30 bytes
+        let wire_bytes = match msg {
+            MavMessage::ENCAPSULATED_DATA(_) => 267,
+            _ => 50, // conservative average for telemetry messages
+        };
+
+        // Rate limit before acquiring the port lock
+        self.rate_limiter.lock().unwrap().consume(wire_bytes);
+
+        // Assign sequence INSIDE the port lock so wire order matches sequence order
+        let mut lock = self.port.lock().unwrap();
+        let header = MavHeader {
+            system_id: self.system_id,
+            component_id: self.component_id,
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+        };
+        mavlink::write_v2_msg(&mut *lock, header, msg).map(|_| ())
+    }
+}
+
+/// Open a serial port with a write timeout and rate limiter.
+fn open_mav_serial(addr: &str, radio_bps: u32) -> Arc<MavSerial> {
+    // Parse "serial:/dev/ttyXXX:BAUD"
+    let parts: Vec<&str> = addr.split(':').collect();
+    let (path, baud) = if parts.len() == 3 && parts[0] == "serial" {
+        (parts[1], parts[2].parse::<u32>().expect("invalid baud rate"))
+    } else {
+        panic!("expected serial:/dev/ttyXXX:BAUD, got {addr}");
     };
 
+    let port = serialport::new(path, baud)
+        .data_bits(serialport::DataBits::Eight)
+        .parity(serialport::Parity::None)
+        .stop_bits(serialport::StopBits::One)
+        .flow_control(serialport::FlowControl::None)
+        .timeout(Duration::from_millis(100))
+        .open()
+        .unwrap_or_else(|e| panic!("failed to open serial port {path}: {e}"));
+
+    println!("Radio rate limiter: {} bytes/sec", radio_bps);
+
+    Arc::new(MavSerial {
+        port: Mutex::new(port),
+        sequence: AtomicU8::new(0),
+        rate_limiter: Mutex::new(RateLimiter::new(radio_bps)),
+        system_id: 1,
+        component_id: 1,
+    })
+}
+
+fn main() {
+    let config = Config::parse();
+
+    println!("Connecting to {}...", config.mavlink_addr);
+
+    let mav = open_mav_serial(&config.mavlink_addr, config.radio_bps);
+
+    // Start camera if enabled
+    if !config.no_camera {
+        match camera::CameraManager::start(&config) {
+            Ok((_cam, frame_rx)) => {
+                println!(
+                    "Camera started: {} -> {} ({}s segments)",
+                    config.camera_device, config.recording_dir, config.segment_duration
+                );
+                println!(
+                    "Radio stream: {}x{} {} q={} @ ~{}fps source",
+                    config.stream_width, config.stream_height,
+                    config.stream_format.to_uppercase(),
+                    config.jpeg_quality, config.stream_fps
+                );
+
+                frame_sender::spawn(mav.clone(), frame_rx);
+
+                // Leak the CameraManager so it lives until process exit.
+                // Its Drop impl would kill ffmpeg, which we don't want.
+                std::mem::forget(_cam);
+            }
+            Err(e) => {
+                eprintln!("WARNING: Camera failed to start: {e}");
+                eprintln!("Continuing with telemetry only.");
+            }
+        }
+    } else {
+        println!("Camera disabled (--no-camera)");
+    }
+
+    // Telemetry send loop
     let start = Instant::now();
     let mut seq: u32 = 0;
+    let interval = Duration::from_millis(1000 / config.telemetry_hz as u64);
 
-    println!("Sending heartbeat + telemetry at 20 Hz. Ctrl-C to stop.");
+    println!(
+        "Sending heartbeat + telemetry at {} Hz. Ctrl-C to stop.",
+        config.telemetry_hz
+    );
 
     loop {
         let elapsed = start.elapsed();
         let t = elapsed.as_secs_f32();
         let time_boot_ms = elapsed.as_millis() as u32;
-        let alt_m = (seq as f32) * 10.0; // climb 10m per tick
+        let alt_m = ((seq % 4000) as f32) * 10.0;
 
-        // Heartbeat
-        conn.send(&header, &MavMessage::HEARTBEAT(HEARTBEAT_DATA {
-            custom_mode: 0,
-            mavtype: MavType::MAV_TYPE_ROCKET,
-            autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
-            base_mode: MavModeFlag::empty(),
-            system_status: MavState::MAV_STATE_ACTIVE,
-            mavlink_version: 0x3,
-        }))
-        .expect("failed to send heartbeat");
+        macro_rules! send_or_log {
+            ($msg:expr, $label:expr) => {
+                if let Err(e) = mav.send($msg) {
+                    eprintln!("[telemetry] {} send failed: {e}", $label);
+                }
+            };
+        }
 
-        // Position with incrementing altitude
-        conn.send(&header, &MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
-            time_boot_ms,
-            lat: 357_796_000,   // ~35.7796 N
-            lon: -789_320_000,  // ~-78.932 W
-            alt: (alt_m * 1000.0) as i32,
-            relative_alt: (alt_m * 1000.0) as i32,
-            vx: 0,
-            vy: 0,
-            vz: -100, // climbing at 1 m/s
-            hdg: u16::MAX,
-        }))
-        .expect("failed to send position");
+        send_or_log!(
+            &MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+                custom_mode: 0,
+                mavtype: MavType::MAV_TYPE_ROCKET,
+                autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
+                base_mode: MavModeFlag::empty(),
+                system_status: MavState::MAV_STATE_ACTIVE,
+                mavlink_version: 0x3,
+            }),
+            "heartbeat"
+        );
 
-        // IMU — simulated vibration with slow drift
-        conn.send(&header, &MavMessage::SCALED_IMU(SCALED_IMU_DATA {
-            time_boot_ms,
-            xacc: (50.0 * t.sin()) as i16,           // mG
-            yacc: (30.0 * (t * 1.3).cos()) as i16,
-            zacc: -1000 + (20.0 * (t * 0.7).sin()) as i16, // ~-1g with wobble
-            xgyro: (100.0 * (t * 2.0).sin()) as i16, // mrad/s
-            ygyro: (80.0 * (t * 1.7).cos()) as i16,
-            zgyro: (60.0 * (t * 0.9).sin()) as i16,
-            xmag: (250.0 + 10.0 * (t * 0.1).sin()) as i16, // mgauss
-            ymag: (50.0 + 10.0 * (t * 0.1).cos()) as i16,
-            zmag: (-400.0 + 5.0 * t.sin()) as i16,
-        }))
-        .expect("failed to send IMU");
+        send_or_log!(
+            &MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
+                time_boot_ms,
+                lat: 357_796_000,
+                lon: -789_320_000,
+                alt: (alt_m * 1000.0) as i32,
+                relative_alt: (alt_m * 1000.0) as i32,
+                vx: 0,
+                vy: 0,
+                vz: -100,
+                hdg: u16::MAX,
+            }),
+            "position"
+        );
 
-        // Barometer — pressure decreases with altitude
+        send_or_log!(
+            &MavMessage::SCALED_IMU(SCALED_IMU_DATA {
+                time_boot_ms,
+                xacc: (50.0 * t.sin()) as i16,
+                yacc: (30.0 * (t * 1.3).cos()) as i16,
+                zacc: -1000 + (20.0 * (t * 0.7).sin()) as i16,
+                xgyro: (100.0 * (t * 2.0).sin()) as i16,
+                ygyro: (80.0 * (t * 1.7).cos()) as i16,
+                zgyro: (60.0 * (t * 0.9).sin()) as i16,
+                xmag: (250.0 + 10.0 * (t * 0.1).sin()) as i16,
+                ymag: (50.0 + 10.0 * (t * 0.1).cos()) as i16,
+                zmag: (-400.0 + 5.0 * t.sin()) as i16,
+            }),
+            "IMU"
+        );
+
         let press_hpa = 1013.25 * (1.0 - alt_m / 44330.0_f32).powf(5.255);
-        let temp_cdeg = (2200.0 - alt_m * 0.65) as i16; // ~22°C, lapse rate 6.5°C/km
-        conn.send(&header, &MavMessage::SCALED_PRESSURE(SCALED_PRESSURE_DATA {
-            time_boot_ms,
-            press_abs: press_hpa,
-            press_diff: 0.0,
-            temperature: temp_cdeg,
-        }))
-        .expect("failed to send pressure");
+        let temp_cdeg = (2200.0 - alt_m * 0.65) as i16;
+        send_or_log!(
+            &MavMessage::SCALED_PRESSURE(SCALED_PRESSURE_DATA {
+                time_boot_ms,
+                press_abs: press_hpa,
+                press_diff: 0.0,
+                temperature: temp_cdeg,
+            }),
+            "pressure"
+        );
 
-        // GPS raw
-        conn.send(&header, &MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
-            time_usec: elapsed.as_micros() as u64,
-            fix_type: GpsFixType::GPS_FIX_TYPE_3D_FIX,
-            lat: 357_796_000,
-            lon: -789_320_000,
-            alt: (alt_m * 1000.0) as i32,
-            eph: 120, // HDOP * 100
-            epv: 180, // VDOP * 100
-            vel: 100, // cm/s
-            cog: u16::MAX,
-            satellites_visible: 12,
-        }))
-        .expect("failed to send GPS");
-
-        println!(
-            "[{:>6.1}s] seq={seq} alt={alt_m:.0}m press={press_hpa:.1}hPa",
-            elapsed.as_secs_f64()
+        send_or_log!(
+            &MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA {
+                time_usec: elapsed.as_micros() as u64,
+                fix_type: GpsFixType::GPS_FIX_TYPE_3D_FIX,
+                lat: 357_796_000,
+                lon: -789_320_000,
+                alt: (alt_m * 1000.0) as i32,
+                eph: 120,
+                epv: 180,
+                vel: 100,
+                cog: u16::MAX,
+                satellites_visible: 12,
+            }),
+            "GPS"
         );
 
         seq += 1;
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(interval);
     }
 }

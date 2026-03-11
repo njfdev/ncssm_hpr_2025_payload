@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-mavlink = { version = "0.17", features = ["ardupilotmega", "udp"] }
+mavlink = { version = "0.17", features = ["ardupilotmega", "udp", "direct-serial"] }
+serialport = { version = "4", default-features = false }
+clap = { version = "4", features = ["derive"] }
