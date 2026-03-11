@@ -65,6 +65,13 @@ const CHART_DEFS = [
 ];
 
 function makeOpts(width, seriesDefs, hooks) {
+  // Use spline paths for smooth curves even with sparse data
+  const spline = uPlot.paths.spline?.();
+  const smoothSeries = seriesDefs.map((s) => ({
+    ...s,
+    ...(spline ? { paths: spline } : {}),
+  }));
+
   return {
     width,
     height: PLOT_HEIGHT,
@@ -92,7 +99,7 @@ function makeOpts(width, seriesDefs, hooks) {
         size: 55,
       },
     ],
-    series: [{ label: "Time (s)" }, ...seriesDefs],
+    series: [{ label: "Time (s)" }, ...smoothSeries],
     hooks,
   };
 }
