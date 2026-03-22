@@ -43,14 +43,14 @@ const CHART_DEFS = [
     numSeries: 3,
   },
   {
-    id: "gyro",
-    title: "Gyroscope",
+    id: "orientation",
+    title: "Orientation",
     series: [
-      { label: "X", stroke: "#ff4444", width: 1.5 },
-      { label: "Y", stroke: "#44ff44", width: 1.5 },
-      { label: "Z", stroke: "#4488ff", width: 1.5 },
+      { label: "Roll", stroke: "#ff4444", width: 1.5 },
+      { label: "Pitch", stroke: "#44ff44", width: 1.5 },
+      { label: "Yaw", stroke: "#4488ff", width: 1.5 },
     ],
-    extract: (s) => [n(s.gyro_x), n(s.gyro_y), n(s.gyro_z)],
+    extract: (s) => [n(s.roll), n(s.pitch), n(s.yaw)],
     numSeries: 3,
   },
   {

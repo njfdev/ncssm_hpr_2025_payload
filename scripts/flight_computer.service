@@ -1,0 +1,19 @@
+[Unit]
+Description=NCSSM HPR 2025 Flight Computer
+After=multi-user.target
+
+[Service]
+Type=simple
+User=orangepi
+WorkingDirectory=/home/orangepi
+ExecStart=/home/orangepi/flight_computer \
+    --mavlink-addr serial:/dev/ttyAS4:115200 \
+    --recording-dir /home/orangepi/flight_data \
+    --pico-uart /dev/ttyAS2
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/orangepi/fc.log
+StandardError=append:/home/orangepi/fc.log
+
+[Install]
+WantedBy=multi-user.target

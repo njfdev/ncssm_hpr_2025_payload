@@ -14,6 +14,8 @@ pub fn spawn(
     frame_rx: mpsc::Receiver<CameraFrame>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let mut skip_counter: u32 = 0;
+
         loop {
             // Block until a frame arrives
             let frame = match frame_rx.recv() {
@@ -23,6 +25,24 @@ pub fn spawn(
 
             // Drain any stale queued frames — always send the freshest
             let frame = drain_to_latest(frame, &frame_rx);
+
+            // Adaptive frame skipping: when the link is throttled, skip frames
+            // to avoid queuing up stale data
+            let load = mav.load_factor();
+            let skip = if load < 0.3 {
+                // Severely throttled — send 1 in 4
+                skip_counter % 4 != 0
+            } else if load < 0.6 {
+                // Moderately throttled — send 1 in 2
+                skip_counter % 2 != 0
+            } else {
+                false
+            };
+            skip_counter = skip_counter.wrapping_add(1);
+
+            if skip {
+                continue;
+            }
 
             let data = &frame.image_data;
             let total_size = data.len() as u32;
@@ -45,7 +65,7 @@ pub fn spawn(
                 continue;
             }
 
-            // Send data chunks with pacing
+            // Send data chunks
             let mut send_failed = false;
             for (seq, chunk) in data.chunks(CHUNK_SIZE).enumerate() {
                 let mut payload = [0u8; 253];
@@ -61,8 +81,6 @@ pub fn spawn(
                     send_failed = true;
                     break;
                 }
-
-                // Rate limiter in MavSerial handles pacing automatically
             }
 
             if send_failed {
@@ -70,10 +88,18 @@ pub fn spawn(
                 continue;
             }
 
-            println!(
-                "[frame_sender] {}x{} {} {} bytes ({} pkts)",
-                frame.width, frame.height, frame.mime_type, total_size, num_packets
-            );
+            if load < 1.0 {
+                println!(
+                    "[frame_sender] {}x{} {} {} bytes ({} pkts) [rate {:.0}%]",
+                    frame.width, frame.height, frame.mime_type, total_size, num_packets,
+                    load * 100.0
+                );
+            } else {
+                println!(
+                    "[frame_sender] {}x{} {} {} bytes ({} pkts)",
+                    frame.width, frame.height, frame.mime_type, total_size, num_packets
+                );
+            }
         }
     })
 }

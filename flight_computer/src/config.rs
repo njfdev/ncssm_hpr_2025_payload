@@ -7,12 +7,16 @@ pub struct Config {
     #[arg(long, default_value = "serial:/dev/ttyUSB0:115200")]
     pub mavlink_addr: String,
 
-    /// Camera v4l2 device path
-    #[arg(long, default_value = "/dev/video0")]
-    pub camera_device: String,
+    /// Camera v4l2 device paths (specify multiple --camera-device for multi-camera)
+    #[arg(long = "camera-device")]
+    pub camera_devices: Vec<String>,
 
-    /// Local recording output directory
-    #[arg(long, default_value = "./recordings")]
+    /// Which camera index to stream over radio (0-based)
+    #[arg(long, default_value_t = 0)]
+    pub stream_camera: usize,
+
+    /// Data output directory (video recordings + telemetry logs)
+    #[arg(long, default_value = "./flight_data")]
     pub recording_dir: String,
 
     /// Local recording FPS
@@ -56,7 +60,7 @@ pub struct Config {
     pub test_source: bool,
 
     /// Max radio throughput in bytes/sec (rate limiter to avoid overdriving)
-    #[arg(long, default_value_t = 4000)]
+    #[arg(long, default_value_t = 6000)]
     pub radio_bps: u32,
 
     /// ffmpeg binary name (use "ffmpeg" for standard, "ffmpeg-rk" for hw accel)
@@ -66,4 +70,28 @@ pub struct Config {
     /// Video encoder for local recording (e.g. h264_v4l2m2m, libx264)
     #[arg(long, default_value = "libx264")]
     pub video_encoder: String,
+
+    /// UART device for pico logger connection
+    #[arg(long, default_value = "/dev/ttyAS2")]
+    pub pico_uart: String,
+
+    /// Baud rate for pico logger UART
+    #[arg(long, default_value_t = 115200)]
+    pub pico_baud: u32,
+
+    /// Disable pico logger reader (for testing without hardware)
+    #[arg(long)]
+    pub no_pico: bool,
+
+    /// Disable audio recording
+    #[arg(long)]
+    pub no_audio: bool,
+
+    /// Audio input format for ffmpeg (e.g. "pulse", "alsa")
+    #[arg(long, default_value = "pulse")]
+    pub audio_format: String,
+
+    /// Audio input device for ffmpeg
+    #[arg(long, default_value = "default")]
+    pub audio_device: String,
 }

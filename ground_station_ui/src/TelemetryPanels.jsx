@@ -12,6 +12,16 @@ function Field({ label, value, color }) {
   );
 }
 
+function formatUptime(ms) {
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function fixColor(fixType) {
   if (["3D Fix", "DGPS", "RTK Float", "RTK Fixed"].includes(fixType)) return "var(--green)";
   if (fixType === "2D Fix") return "var(--yellow)";
@@ -51,6 +61,10 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
 
   return (
     <section id="panels">
+      {!s.pico_connected && s.connected && (
+        <div className="pico-warning">Not Receiving Telemetry from Pico Logger!</div>
+      )}
+
       {/* GPS */}
       <div className="panel">
         <h3>GPS</h3>
@@ -71,9 +85,7 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
           <Field label="Pressure:" value={n(s.pressure_hpa).toFixed(2) + " hPa"} />
           <Field label="Temp:" value={n(s.temperature_c).toFixed(2) + " \u00B0C"} />
           <Field label="Baro Alt:" value={n(s.baro_alt).toFixed(2) + " m"} />
-          <Field label="Fused Alt:" value={n(s.fused_alt).toFixed(2) + " m"} />
-          <Field label="Rel Alt:" value={n(s.fused_relative_alt).toFixed(2) + " m"} />
-          <Field label="Vz:" value={n(s.vz).toFixed(2) + " m/s"} />
+          <Field label="GPS Alt:" value={n(s.gps_alt).toFixed(2) + " m"} />
         </div>
       </div>
 
@@ -87,13 +99,13 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
         </div>
       </div>
 
-      {/* Gyroscope */}
+      {/* Orientation */}
       <div className="panel">
-        <h3>Gyroscope</h3>
+        <h3>Orientation</h3>
         <div className="panel-body">
-          <Field label="X:" value={n(s.gyro_x).toFixed(3) + " \u00B0/s"} color="var(--red)" />
-          <Field label="Y:" value={n(s.gyro_y).toFixed(3) + " \u00B0/s"} color="var(--green)" />
-          <Field label="Z:" value={n(s.gyro_z).toFixed(3) + " \u00B0/s"} color="var(--blue)" />
+          <Field label="Roll:" value={n(s.roll).toFixed(1) + "\u00B0"} color="var(--red)" />
+          <Field label="Pitch:" value={n(s.pitch).toFixed(1) + "\u00B0"} color="var(--green)" />
+          <Field label="Yaw:" value={n(s.yaw).toFixed(1) + "\u00B0"} color="var(--blue)" />
         </div>
       </div>
 
@@ -104,6 +116,27 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
           <Field label="X:" value={n(s.mag_x).toFixed(2) + " \u00B5T"} color="var(--red)" />
           <Field label="Y:" value={n(s.mag_y).toFixed(2) + " \u00B5T"} color="var(--green)" />
           <Field label="Z:" value={n(s.mag_z).toFixed(2) + " \u00B5T"} color="var(--blue)" />
+        </div>
+      </div>
+
+      {/* Recording */}
+      <div className="panel">
+        <h3>Recording</h3>
+        <div className="panel-body">
+          <Field
+            label="Camera:"
+            value={s.camera_recording ? "Recording" : "Stopped"}
+            color={s.camera_recording ? "var(--green)" : "var(--red)"}
+          />
+          <Field
+            label="Audio:"
+            value={s.audio_recording ? "Recording" : "Stopped"}
+            color={s.audio_recording ? "var(--green)" : "var(--red)"}
+          />
+          <Field
+            label="Uptime:"
+            value={s.connected ? formatUptime(n(s.timestamp_ms)) : "--"}
+          />
         </div>
       </div>
 

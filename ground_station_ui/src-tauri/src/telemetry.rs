@@ -37,6 +37,11 @@ pub struct TelemetryState {
     pub gyro_y: f32,
     pub gyro_z: f32,
 
+    // Orientation (degrees)
+    pub roll: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+
     // IMU — Magnetometer
     pub mag_x: f32,
     pub mag_y: f32,
@@ -63,6 +68,17 @@ pub struct TelemetryState {
     rate_window_start: Instant,
     rate_window_count: u64,
     rate_window_bytes: u64,
+
+    // Pico logger status
+    pub pico_connected: bool,
+
+    // Recording status from flight computer
+    pub camera_recording: bool,
+    pub audio_recording: bool,
+
+    // Camera switching
+    pub camera_count: u32,
+    pub stream_camera: u32,
 
     // Sequence tracking
     last_seq: Option<u8>,
@@ -108,6 +124,11 @@ pub struct TelemetrySnapshot {
     pub gyro_y: f32,
     pub gyro_z: f32,
 
+    // Orientation (degrees)
+    pub roll: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+
     // IMU — Magnetometer
     pub mag_x: f32,
     pub mag_y: f32,
@@ -124,6 +145,17 @@ pub struct TelemetrySnapshot {
     pub max_bytes_per_sec: f32,
     pub bandwidth_pct: f32,
     pub packet_loss_pct: f32,
+
+    // Pico logger status
+    pub pico_connected: bool,
+
+    // Recording status from flight computer
+    pub camera_recording: bool,
+    pub audio_recording: bool,
+
+    // Camera switching
+    pub camera_count: u32,
+    pub stream_camera: u32,
 }
 
 impl TelemetryState {
@@ -158,6 +190,10 @@ impl TelemetryState {
             gyro_y: 0.0,
             gyro_z: 0.0,
 
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+
             mag_x: 0.0,
             mag_y: 0.0,
             mag_z: 0.0,
@@ -171,6 +207,14 @@ impl TelemetryState {
 
             bytes_per_sec: 0.0,
             max_bytes_per_sec: max_bytes,
+
+            pico_connected: true,
+
+            camera_recording: false,
+            audio_recording: false,
+
+            camera_count: 0,
+            stream_camera: 0,
 
             packet_loss_pct: 0.0,
             total_expected: 0,
@@ -226,6 +270,13 @@ impl TelemetryState {
                 self.mag_z = data.zmag as f32 * 0.1;
             }
 
+            MavMessage::ATTITUDE(data) => {
+                self.remote_time_boot_ms = Some(data.time_boot_ms);
+                self.roll = data.roll.to_degrees();
+                self.pitch = data.pitch.to_degrees();
+                self.yaw = data.yaw.to_degrees();
+            }
+
             MavMessage::SCALED_PRESSURE(data) => {
                 self.remote_time_boot_ms = Some(data.time_boot_ms);
                 self.pressure_hpa = data.press_abs;
@@ -254,6 +305,20 @@ impl TelemetryState {
                     GpsFixType::GPS_FIX_TYPE_PPP => "PPP",
                 }
                 .into();
+            }
+
+            MavMessage::NAMED_VALUE_INT(data) => {
+                if data.name.starts_with(b"pico_ok") {
+                    self.pico_connected = data.value != 0;
+                } else if data.name.starts_with(b"cam_rec") {
+                    self.camera_recording = data.value != 0;
+                } else if data.name.starts_with(b"aud_rec") {
+                    self.audio_recording = data.value != 0;
+                } else if data.name.starts_with(b"cam_cnt") {
+                    self.camera_count = data.value as u32;
+                } else if data.name.starts_with(b"cam_idx") {
+                    self.stream_camera = data.value as u32;
+                }
             }
 
             _ => {}
@@ -293,6 +358,10 @@ impl TelemetryState {
             gyro_y: self.gyro_y,
             gyro_z: self.gyro_z,
 
+            roll: self.roll,
+            pitch: self.pitch,
+            yaw: self.yaw,
+
             mag_x: self.mag_x,
             mag_y: self.mag_y,
             mag_z: self.mag_z,
@@ -307,6 +376,11 @@ impl TelemetryState {
             max_bytes_per_sec: self.max_bytes_per_sec,
             bandwidth_pct: self.bandwidth_pct(),
             packet_loss_pct: self.packet_loss_pct,
+            pico_connected: self.pico_connected,
+            camera_recording: self.camera_recording,
+            audio_recording: self.audio_recording,
+            camera_count: self.camera_count,
+            stream_camera: self.stream_camera,
         }
     }
 
@@ -362,7 +436,11 @@ fn payload_size(msg: &MavMessage) -> usize {
         MavMessage::GLOBAL_POSITION_INT(_) => 28,
         MavMessage::SCALED_IMU(_) => 22,
         MavMessage::SCALED_PRESSURE(_) => 14,
+        MavMessage::ATTITUDE(_) => 28,
         MavMessage::GPS_RAW_INT(_) => 30,
+        MavMessage::NAMED_VALUE_INT(_) => 18,
+        MavMessage::DATA_TRANSMISSION_HANDSHAKE(_) => 13,
+        MavMessage::ENCAPSULATED_DATA(_) => 255,
         _ => 20,
     }
 }

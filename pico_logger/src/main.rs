@@ -8,8 +8,9 @@ mod telemetry;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::{self, I2c, Config as I2cConfig};
+use embassy_rp::uart::{self, UartTx, UartRx, Config as UartConfig};
 use embedded_hal_async::i2c::I2c as I2cTrait;
-use embassy_rp::peripherals::{USB, I2C0, I2C1, SPI0, PIN_18, PIN_19, PIN_20, PIN_23};
+use embassy_rp::peripherals::{USB, I2C0, I2C1, SPI0, PIN_18, PIN_19, PIN_20, PIN_23, UART0, UART1};
 use embassy_rp::rom_data::reset_to_usb_boot;
 use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_rp::multicore::{spawn_core1, Stack};
@@ -25,11 +26,14 @@ use sensors::{SensorData, ImuCalibration, LogEntry};
 use sensors::orientation::OrientationTracker;
 use sdcard::{SdLogger, format_sd_status};
 use telemetry::{format_status, format_telemetry, format_calibration, format_telemetry_extended};
+use payload_types::TelemetryPacket;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => UsbInterruptHandler<USB>;
     I2C0_IRQ => i2c::InterruptHandler<I2C0>;
     I2C1_IRQ => i2c::InterruptHandler<I2C1>;
+    UART0_IRQ => uart::InterruptHandler<UART0>;
+    UART1_IRQ => uart::InterruptHandler<UART1>;
 });
 
 #[unsafe(link_section = ".bi_entries")]
@@ -310,8 +314,19 @@ async fn main(spawner: Spawner) {
     // I2C0 for IMU (LSM6DSOX + LIS3MDL): SCL=GP29, SDA=GP28
     let mut i2c0 = I2c::new_async(p.I2C0, p.PIN_29, p.PIN_28, Irqs, i2c_config);
 
-    // I2C1 for Barometer (BMP390): SCL=GP3, SDA=GP2
+    // I2C1 for Barometer (BMP390) + ENS160: SCL=GP3, SDA=GP2
     let mut i2c1 = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, i2c_config);
+
+    // UART0 for telemetry output to flight computer: TX=GP0, 115200 baud
+    let mut uart_config = UartConfig::default();
+    uart_config.baudrate = 115200;
+    let mut uart_tx = UartTx::new(p.UART0, p.PIN_0, p.DMA_CH0, uart_config);
+
+    // UART1 RX for UBlox GPS: RX=GP25 (D25), 38400 baud (UBlox M10 default)
+    let mut gps_uart_config = UartConfig::default();
+    gps_uart_config.baudrate = 38400;
+    let gps_rx = UartRx::new(p.UART1, p.PIN_25, Irqs, p.DMA_CH1, gps_uart_config);
+    spawner.spawn(sensors::gps::gps_reader_task(gps_rx)).unwrap();
 
     // Give core1 time to initialize SD card
     Timer::after_millis(500).await;
@@ -337,351 +352,344 @@ async fn main(spawner: Spawner) {
     // Orientation tracker
     let mut orientation_tracker = OrientationTracker::new();
 
+    // Always-on telemetry: read sensors and send UART from boot, no USB command needed
+    let telemetry_start = Instant::now();
+
+    use embassy_time::with_timeout;
+    use embassy_time::Duration;
+
     loop {
-        class.wait_connection().await;
+        // Always read sensors
+        if bmp390_ok {
+            let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
+        }
+        if lsm6dsox_ok {
+            let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
+        }
+        if lis3mdl_ok {
+            let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
+        }
+        if ens160_ok {
+            let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
+        }
 
-        loop {
-            // Wait for a command
-            match class.read_packet(&mut cmd_buf).await {
-                Ok(n) if n > 0 => {
-                    let cmd = &cmd_buf[..n];
+        counter = counter.wrapping_add(1);
+        let elapsed_ms = telemetry_start.elapsed().as_millis();
+        orientation_tracker.update(elapsed_ms, &sensor_data, &imu_calib);
 
-                    if cmd.starts_with(b"BOOTSEL") || cmd.starts_with(b"bootsel") {
-                        reset_to_usb_boot(0, 0);
-                    } else if cmd.starts_with(b"PING") || cmd.starts_with(b"ping") {
-                        let _ = class.write_packet(b"PONG\r\n").await;
-                    } else if cmd.starts_with(b"SENSORS") || cmd.starts_with(b"sensors") {
-                        let msg = format_status(bmp390_ok, lsm6dsox_ok, lis3mdl_ok, ens160_ok);
-                        let _ = class.write_packet(msg.as_bytes()).await;
-                    } else if cmd.starts_with(b"SDSTATUS") || cmd.starts_with(b"sdstatus") {
-                        let msg = format_sd_status(sd_available, log_filename.as_ref().map(|s| s.as_str()));
-                        let _ = class.write_packet(msg.as_bytes()).await;
-                    } else if cmd.starts_with(b"START") || cmd.starts_with(b"start") {
-                        let _ = class.write_packet(b"STREAMING\r\n").await;
+        // Always send UART telemetry to flight computer (10Hz)
+        {
+            let gps = sensors::gps::latest();
+            let packet = TelemetryPacket {
+                counter,
+                timestamp_ms: telemetry_start.elapsed().as_millis() as u32,
+                pressure_pa: sensor_data.pressure_raw,
+                temp_cdeg: sensor_data.temp_raw,
+                accel_x: sensor_data.accel_x,
+                accel_y: sensor_data.accel_y,
+                accel_z: sensor_data.accel_z,
+                gyro_x: sensor_data.gyro_x,
+                gyro_y: sensor_data.gyro_y,
+                gyro_z: sensor_data.gyro_z,
+                mag_x: sensor_data.mag_x,
+                mag_y: sensor_data.mag_y,
+                mag_z: sensor_data.mag_z,
+                roll_cdeg: (orientation_tracker.orientation.roll * 100.0) as i16,
+                pitch_cdeg: (orientation_tracker.orientation.pitch * 100.0) as i16,
+                yaw_cdeg: (orientation_tracker.orientation.yaw * 100.0) as i16,
+                aqi: sensor_data.aqi,
+                tvoc_ppb: sensor_data.tvoc_ppb,
+                eco2_ppm: sensor_data.eco2_ppm,
+                gps_lat_e7: gps.lat_e7,
+                gps_lon_e7: gps.lon_e7,
+                gps_alt_mm: gps.alt_mm,
+                gps_fix: gps.fix_quality,
+                gps_sats: gps.satellites,
+                gps_hdop_e2: gps.hdop_e2,
+                gps_speed_cms: gps.speed_cms,
+                gps_course_e2: gps.course_e2,
+            };
+            let mut cobs_buf = [0u8; 104];
+            if let Ok(encoded) = packet.encode_cobs(&mut cobs_buf) {
+                let _ = uart_tx.write(encoded).await;
+            }
+        }
 
-                        // Stream indefinitely until STOP received (no SD logging)
-                        'streaming: loop {
-                            if bmp390_ok {
-                                let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
-                            }
+        // Check for USB command (non-blocking, 1ms timeout)
+        if let Ok(Ok(n)) = with_timeout(Duration::from_millis(1), class.read_packet(&mut cmd_buf)).await {
+            if n > 0 {
+                let cmd = &cmd_buf[..n];
+
+                if cmd.starts_with(b"BOOTSEL") || cmd.starts_with(b"bootsel") {
+                    reset_to_usb_boot(0, 0);
+                } else if cmd.starts_with(b"PING") || cmd.starts_with(b"ping") {
+                    let _ = class.write_packet(b"PONG\r\n").await;
+                } else if cmd.starts_with(b"SENSORS") || cmd.starts_with(b"sensors") {
+                    let msg = format_status(bmp390_ok, lsm6dsox_ok, lis3mdl_ok, ens160_ok);
+                    let _ = class.write_packet(msg.as_bytes()).await;
+                } else if cmd.starts_with(b"SDSTATUS") || cmd.starts_with(b"sdstatus") {
+                    let msg = format_sd_status(sd_available, log_filename.as_ref().map(|s| s.as_str()));
+                    let _ = class.write_packet(msg.as_bytes()).await;
+                } else if cmd.starts_with(b"READ") || cmd.starts_with(b"read") {
+                    let msg = format_telemetry(counter, &sensor_data);
+                    let _ = class.write_packet(msg.as_bytes()).await;
+                } else if cmd.starts_with(b"SCAN") || cmd.starts_with(b"scan") {
+                    let _ = class.write_packet(b"I2C0 scan:\r\n").await;
+                    let mut found_any = false;
+                    for addr in 0x08u8..0x78u8 {
+                        let mut buf = [0u8; 1];
+                        if i2c0.read(addr, &mut buf).await.is_ok() {
+                            use core::fmt::Write;
+                            let mut msg: heapless::String<16> = heapless::String::new();
+                            let _ = write!(msg, "  0x{:02X}\r\n", addr);
+                            let _ = class.write_packet(msg.as_bytes()).await;
+                            found_any = true;
+                        }
+                    }
+                    if !found_any {
+                        let _ = class.write_packet(b"  (no devices)\r\n").await;
+                    }
+                    let _ = class.write_packet(b"I2C1 scan:\r\n").await;
+                    found_any = false;
+                    for addr in 0x08u8..0x78u8 {
+                        let mut buf = [0u8; 1];
+                        if i2c1.read(addr, &mut buf).await.is_ok() {
+                            use core::fmt::Write;
+                            let mut msg: heapless::String<16> = heapless::String::new();
+                            let _ = write!(msg, "  0x{:02X}\r\n", addr);
+                            let _ = class.write_packet(msg.as_bytes()).await;
+                            found_any = true;
+                        }
+                    }
+                    if !found_any {
+                        let _ = class.write_packet(b"  (no devices)\r\n").await;
+                    }
+                    let _ = class.write_packet(b"OK\r\n").await;
+                } else if cmd.starts_with(b"CALIBRATE") || cmd.starts_with(b"calibrate") {
+                    let _ = class.write_packet(b"CALIBRATING...\r\n").await;
+                    match sensors::calibration::calibrate_imu(&mut i2c0).await {
+                        Ok(calib) => {
+                            imu_calib = calib;
                             if lsm6dsox_ok {
                                 let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
+                                orientation_tracker.init_from_accel(&sensor_data, &imu_calib);
                             }
-                            if lis3mdl_ok {
-                                let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
-                            }
-                            if ens160_ok {
-                                let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
-                            }
-
-                            counter = counter.wrapping_add(1);
-                            let msg = format_telemetry(counter, &sensor_data);
-                            if class.write_packet(msg.as_bytes()).await.is_err() {
-                                break 'streaming;
-                            }
-
-                            Timer::after_millis(100).await;
-
-                            use embassy_time::with_timeout;
-                            use embassy_time::Duration;
-                            if let Ok(Ok(n)) = with_timeout(Duration::from_millis(1), class.read_packet(&mut cmd_buf)).await {
-                                if n > 0 {
-                                    let stop_cmd = &cmd_buf[..n];
-                                    if stop_cmd.starts_with(b"STOP") || stop_cmd.starts_with(b"stop") {
-                                        let _ = class.write_packet(b"STOPPED\r\n").await;
-                                        break 'streaming;
-                                    } else if stop_cmd.starts_with(b"BOOTSEL") || stop_cmd.starts_with(b"bootsel") {
-                                        reset_to_usb_boot(0, 0);
-                                    }
-                                }
-                            }
+                            let msg = format_calibration(&imu_calib);
+                            let _ = class.write_packet(msg.as_bytes()).await;
                         }
-                    } else if cmd.starts_with(b"READ") || cmd.starts_with(b"read") {
-                        if bmp390_ok {
-                            let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
+                        Err(e) => {
+                            let _ = class.write_packet(b"CALIB:ERR ").await;
+                            let _ = class.write_packet(e.as_bytes()).await;
+                            let _ = class.write_packet(b"\r\n").await;
                         }
+                    }
+                } else if cmd.starts_with(b"LOG") || cmd.starts_with(b"log") {
+                    let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
+                    match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
+                        Ok(SdResponse::FileCreated(filename)) => {
+                            log_filename = Some(filename.clone());
+                            logging_active = true;
+                            sd_available = true;
+                            let msg = format_sd_status(true, Some(filename.as_str()));
+                            let _ = class.write_packet(msg.as_bytes()).await;
+                        }
+                        Ok(SdResponse::NotInitialized) => {
+                            sd_available = false;
+                            let _ = class.write_packet(b"SD:NOT_INIT\r\n").await;
+                        }
+                        _ => {
+                            let _ = class.write_packet(b"SD:FILE_ERR\r\n").await;
+                        }
+                    }
+                } else if cmd.starts_with(b"STOPLOG") || cmd.starts_with(b"stoplog") {
+                    let _ = SD_CMD_CHANNEL.try_send(SdCommand::StopLogging);
+                    logging_active = false;
+                    let _ = class.write_packet(b"SD:LOGGING_STOPPED\r\n").await;
+                } else if cmd.starts_with(b"RECORD") || cmd.starts_with(b"record") {
+                    if !logging_active {
+                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
+                        match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
+                            Ok(SdResponse::FileCreated(filename)) => {
+                                log_filename = Some(filename);
+                                logging_active = true;
+                                sd_available = true;
+                            }
+                            Ok(SdResponse::NotInitialized) => {
+                                sd_available = false;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if logging_active {
+                        let _ = class.write_packet(b"RECORDING@50Hz\r\n").await;
+                    } else {
+                        let _ = class.write_packet(b"STREAMING(NO_SD)\r\n").await;
+                    }
+
+                    let start_time = Instant::now();
+                    let mut bmp_counter: u8 = 0;
+                    orientation_tracker.reset();
+
+                    'recording: loop {
                         if lsm6dsox_ok {
                             let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
                         }
                         if lis3mdl_ok {
                             let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
                         }
-                        if ens160_ok {
-                            let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
+
+                        bmp_counter = bmp_counter.wrapping_add(1);
+                        if bmp_counter >= 5 {
+                            bmp_counter = 0;
+                            if bmp390_ok {
+                                let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
+                            }
+                            if ens160_ok {
+                                let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
+                                let _ = sensors::ens160::set_temperature(&mut i2c1, sensor_data.temp_raw).await;
+                            }
                         }
+
                         counter = counter.wrapping_add(1);
-                        let msg = format_telemetry(counter, &sensor_data);
-                        let _ = class.write_packet(msg.as_bytes()).await;
-                    } else if cmd.starts_with(b"SCAN") || cmd.starts_with(b"scan") {
-                        // Scan I2C0 bus for devices
-                        let _ = class.write_packet(b"I2C0 scan:\r\n").await;
-                        let mut found_any = false;
-                        for addr in 0x08u8..0x78u8 {
-                            let mut buf = [0u8; 1];
-                            if i2c0.read(addr, &mut buf).await.is_ok() {
-                                use core::fmt::Write;
-                                let mut msg: heapless::String<16> = heapless::String::new();
-                                let _ = write!(msg, "  0x{:02X}\r\n", addr);
-                                let _ = class.write_packet(msg.as_bytes()).await;
-                                found_any = true;
-                            }
-                        }
-                        if !found_any {
-                            let _ = class.write_packet(b"  (no devices)\r\n").await;
-                        }
-                        // Scan I2C1 bus for devices
-                        let _ = class.write_packet(b"I2C1 scan:\r\n").await;
-                        found_any = false;
-                        for addr in 0x08u8..0x78u8 {
-                            let mut buf = [0u8; 1];
-                            if i2c1.read(addr, &mut buf).await.is_ok() {
-                                use core::fmt::Write;
-                                let mut msg: heapless::String<16> = heapless::String::new();
-                                let _ = write!(msg, "  0x{:02X}\r\n", addr);
-                                let _ = class.write_packet(msg.as_bytes()).await;
-                                found_any = true;
-                            }
-                        }
-                        if !found_any {
-                            let _ = class.write_packet(b"  (no devices)\r\n").await;
-                        }
-                        let _ = class.write_packet(b"OK\r\n").await;
-                    } else if cmd.starts_with(b"CALIBRATE") || cmd.starts_with(b"calibrate") {
-                        // Run IMU calibration - device must be stationary and level
-                        let _ = class.write_packet(b"CALIBRATING...\r\n").await;
-                        match sensors::calibration::calibrate_imu(&mut i2c0).await {
-                            Ok(calib) => {
-                                imu_calib = calib;
-                                // Also initialize orientation from accelerometer
-                                if lsm6dsox_ok {
-                                    let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
-                                    orientation_tracker.init_from_accel(&sensor_data, &imu_calib);
-                                }
-                                let msg = format_calibration(&imu_calib);
-                                let _ = class.write_packet(msg.as_bytes()).await;
-                            }
-                            Err(e) => {
-                                let _ = class.write_packet(b"CALIB:ERR ").await;
-                                let _ = class.write_packet(e.as_bytes()).await;
-                                let _ = class.write_packet(b"\r\n").await;
-                            }
-                        }
-                    } else if cmd.starts_with(b"LOG") || cmd.starts_with(b"log") {
-                        // Request core1 to create a log file
-                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
-
-                        // Wait for response (with timeout)
-                        use embassy_time::with_timeout;
-                        use embassy_time::Duration;
-                        match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
-                            Ok(SdResponse::FileCreated(filename)) => {
-                                log_filename = Some(filename.clone());
-                                logging_active = true;
-                                sd_available = true;
-                                let msg = format_sd_status(true, Some(filename.as_str()));
-                                let _ = class.write_packet(msg.as_bytes()).await;
-                            }
-                            Ok(SdResponse::NotInitialized) => {
-                                sd_available = false;
-                                let _ = class.write_packet(b"SD:NOT_INIT\r\n").await;
-                            }
-                            _ => {
-                                let _ = class.write_packet(b"SD:FILE_ERR\r\n").await;
-                            }
-                        }
-                    } else if cmd.starts_with(b"STOPLOG") || cmd.starts_with(b"stoplog") {
-                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::StopLogging);
-                        logging_active = false;
-                        let _ = class.write_packet(b"SD:LOGGING_STOPPED\r\n").await;
-                    } else if cmd.starts_with(b"RECORD") || cmd.starts_with(b"record") {
-                        // Create log file if not already logging
-                        if !logging_active {
-                            let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
-
-                            use embassy_time::with_timeout;
-                            use embassy_time::Duration;
-                            match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
-                                Ok(SdResponse::FileCreated(filename)) => {
-                                    log_filename = Some(filename);
-                                    logging_active = true;
-                                    sd_available = true;
-                                }
-                                Ok(SdResponse::NotInitialized) => {
-                                    sd_available = false;
-                                }
-                                _ => {}
-                            }
-                        }
+                        let elapsed_ms = start_time.elapsed().as_millis();
+                        let orientation = orientation_tracker.update(elapsed_ms, &sensor_data, &imu_calib);
 
                         if logging_active {
-                            let _ = class.write_packet(b"RECORDING@50Hz\r\n").await;
-                        } else {
-                            let _ = class.write_packet(b"STREAMING(NO_SD)\r\n").await;
+                            let log_entry = LogEntry {
+                                sensor_data,
+                                orientation,
+                                linear_accel_x: sensor_data.linear_accel_x(&imu_calib),
+                                linear_accel_y: sensor_data.linear_accel_y(&imu_calib),
+                                linear_accel_z: sensor_data.linear_accel_z(&imu_calib),
+                            };
+                            let _ = SD_DATA_CHANNEL.try_send((elapsed_ms, log_entry));
                         }
 
-                        let start_time = Instant::now();
-                        let mut bmp_counter: u8 = 0;
-
-                        // Reset orientation tracker for this recording session
-                        orientation_tracker.reset();
-
-                        // Stream and log until STOP received
-                        'recording: loop {
-                            // Read IMU every iteration (50Hz)
-                            if lsm6dsox_ok {
-                                let _ = sensors::lsm6dsox::read(&mut i2c0, &mut sensor_data).await;
+                        {
+                            let gps = sensors::gps::latest();
+                            let packet = TelemetryPacket {
+                                counter,
+                                timestamp_ms: elapsed_ms as u32,
+                                pressure_pa: sensor_data.pressure_raw,
+                                temp_cdeg: sensor_data.temp_raw,
+                                accel_x: sensor_data.accel_x,
+                                accel_y: sensor_data.accel_y,
+                                accel_z: sensor_data.accel_z,
+                                gyro_x: sensor_data.gyro_x,
+                                gyro_y: sensor_data.gyro_y,
+                                gyro_z: sensor_data.gyro_z,
+                                mag_x: sensor_data.mag_x,
+                                mag_y: sensor_data.mag_y,
+                                mag_z: sensor_data.mag_z,
+                                roll_cdeg: (orientation.roll * 100.0) as i16,
+                                pitch_cdeg: (orientation.pitch * 100.0) as i16,
+                                yaw_cdeg: (orientation.yaw * 100.0) as i16,
+                                aqi: sensor_data.aqi,
+                                tvoc_ppb: sensor_data.tvoc_ppb,
+                                eco2_ppm: sensor_data.eco2_ppm,
+                                gps_lat_e7: gps.lat_e7,
+                                gps_lon_e7: gps.lon_e7,
+                                gps_alt_mm: gps.alt_mm,
+                                gps_fix: gps.fix_quality,
+                                gps_sats: gps.satellites,
+                                gps_hdop_e2: gps.hdop_e2,
+                                gps_speed_cms: gps.speed_cms,
+                                gps_course_e2: gps.course_e2,
+                            };
+                            let mut cobs_buf = [0u8; 104];
+                            if let Ok(encoded) = packet.encode_cobs(&mut cobs_buf) {
+                                let _ = uart_tx.write(encoded).await;
                             }
-                            if lis3mdl_ok {
-                                let _ = sensors::lis3mdl::read(&mut i2c0, &mut sensor_data).await;
+                        }
+
+                        if counter % 5 == 0 {
+                            let msg = format_telemetry_extended(counter, &sensor_data, &orientation, &imu_calib);
+                            if class.write_packet(msg.as_bytes()).await.is_err() {
+                                break 'recording;
                             }
+                        }
 
-                            // Read BMP390 every 5th iteration (10Hz)
-                            bmp_counter = bmp_counter.wrapping_add(1);
-                            if bmp_counter >= 5 {
-                                bmp_counter = 0;
-                                if bmp390_ok {
-                                    let _ = sensors::bmp390::read(&mut i2c1, &mut sensor_data).await;
-                                }
-                                // Also read ENS160 at 10Hz (it updates internally at 1Hz)
-                                if ens160_ok {
-                                    let _ = sensors::ens160::read(&mut i2c1, &mut sensor_data).await;
-                                    // Update ENS160 with temperature compensation from BMP390
-                                    let _ = sensors::ens160::set_temperature(&mut i2c1, sensor_data.temp_raw).await;
-                                }
-                            }
+                        Timer::after_millis(20).await;
 
-                            counter = counter.wrapping_add(1);
-                            let elapsed_ms = start_time.elapsed().as_millis();
-
-                            // Update orientation from gyroscope data
-                            let orientation = orientation_tracker.update(elapsed_ms, &sensor_data, &imu_calib);
-
-                            // Send data to core1 for logging (non-blocking)
-                            if logging_active {
-                                // Create log entry with derived measurements
-                                let log_entry = LogEntry {
-                                    sensor_data,
-                                    orientation,
-                                    linear_accel_x: sensor_data.linear_accel_x(&imu_calib),
-                                    linear_accel_y: sensor_data.linear_accel_y(&imu_calib),
-                                    linear_accel_z: sensor_data.linear_accel_z(&imu_calib),
-                                };
-                                // Use try_send to avoid blocking if channel is full
-                                // Data will be dropped if channel is full (better than blocking)
-                                let _ = SD_DATA_CHANNEL.try_send((elapsed_ms, log_entry));
-                            }
-
-                            // Send extended telemetry over USB every 5th iteration (10Hz)
-                            if counter % 5 == 0 {
-                                let msg = format_telemetry_extended(counter, &sensor_data, &orientation, &imu_calib);
-                                if class.write_packet(msg.as_bytes()).await.is_err() {
+                        if let Ok(Ok(n)) = with_timeout(Duration::from_millis(1), class.read_packet(&mut cmd_buf)).await {
+                            if n > 0 {
+                                let stop_cmd = &cmd_buf[..n];
+                                if stop_cmd.starts_with(b"STOP") || stop_cmd.starts_with(b"stop") {
+                                    let _ = SD_CMD_CHANNEL.try_send(SdCommand::StopLogging);
+                                    logging_active = false;
+                                    let _ = class.write_packet(b"STOPPED\r\n").await;
                                     break 'recording;
+                                } else if stop_cmd.starts_with(b"BOOTSEL") || stop_cmd.starts_with(b"bootsel") {
+                                    reset_to_usb_boot(0, 0);
                                 }
-                            }
-
-                            // Wait 20ms between readings (50 Hz)
-                            Timer::after_millis(20).await;
-
-                            // Check for incoming command
-                            use embassy_time::with_timeout;
-                            use embassy_time::Duration;
-                            if let Ok(Ok(n)) = with_timeout(Duration::from_millis(1), class.read_packet(&mut cmd_buf)).await {
-                                if n > 0 {
-                                    let stop_cmd = &cmd_buf[..n];
-                                    if stop_cmd.starts_with(b"STOP") || stop_cmd.starts_with(b"stop") {
-                                        // Tell core1 to stop and flush
-                                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::StopLogging);
-                                        logging_active = false;
-                                        let _ = class.write_packet(b"STOPPED\r\n").await;
-                                        break 'recording;
-                                    } else if stop_cmd.starts_with(b"BOOTSEL") || stop_cmd.starts_with(b"bootsel") {
-                                        reset_to_usb_boot(0, 0);
-                                    }
-                                }
-                            }
-                        }
-                    } else if cmd.starts_with(b"DOWNLOAD") || cmd.starts_with(b"download") {
-                        // Download the latest log file over USB
-                        use embassy_time::with_timeout;
-                        use embassy_time::Duration;
-                        use core::fmt::Write;
-
-                        // First, find the latest file
-                        let _ = SD_CMD_CHANNEL.try_send(SdCommand::FindLatestFile);
-
-                        match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
-                            Ok(SdResponse::LatestFile(filename)) => {
-                                // Get file size
-                                let _ = SD_CMD_CHANNEL.try_send(SdCommand::GetFileSize(filename.clone()));
-
-                                match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
-                                    Ok(SdResponse::FileSize(size)) => {
-                                        // Send header: FILE:<name>,<size>\r\n
-                                        let mut header: heapless::String<64> = heapless::String::new();
-                                        let _ = write!(header, "FILE:{},{}\r\n", filename, size);
-                                        let _ = class.write_packet(header.as_bytes()).await;
-
-                                        // Transfer file in chunks
-                                        let mut offset: u32 = 0;
-                                        let mut transfer_ok = true;
-
-                                        while offset < size && transfer_ok {
-                                            if SD_CMD_CHANNEL.try_send(SdCommand::ReadFileChunk(filename.clone(), offset)).is_err() {
-                                                transfer_ok = false;
-                                                continue;
-                                            }
-
-                                            // Small delay to let core1 process command
-                                            Timer::after_millis(10).await;
-
-                                            match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
-                                                Ok(SdResponse::FileChunk(data, bytes_read)) => {
-                                                    if bytes_read == 0 {
-                                                        break; // EOF
-                                                    }
-                                                    // Send data in USB-sized chunks (max 64 bytes per packet)
-                                                    let mut sent = 0;
-                                                    while sent < bytes_read && transfer_ok {
-                                                        let chunk_end = core::cmp::min(sent + 64, bytes_read);
-                                                        if class.write_packet(&data[sent..chunk_end]).await.is_err() {
-                                                            transfer_ok = false;
-                                                        }
-                                                        sent = chunk_end;
-                                                    }
-                                                    offset += bytes_read as u32;
-                                                }
-                                                Ok(SdResponse::ReadError) | Ok(SdResponse::NotInitialized) | Ok(_) | Err(_) => {
-                                                    transfer_ok = false;
-                                                }
-                                            }
-                                        }
-
-                                        if transfer_ok {
-                                            let _ = class.write_packet(b"\r\nEOF\r\n").await;
-                                        } else {
-                                            let _ = class.write_packet(b"\r\nERROR:TRANSFER\r\n").await;
-                                        }
-                                    }
-                                    _ => {
-                                        let _ = class.write_packet(b"ERROR:SIZE\r\n").await;
-                                    }
-                                }
-                            }
-                            Ok(SdResponse::NoFiles) => {
-                                let _ = class.write_packet(b"ERROR:NO_FILES\r\n").await;
-                            }
-                            Ok(SdResponse::NotInitialized) => {
-                                let _ = class.write_packet(b"ERROR:SD_NOT_INIT\r\n").await;
-                            }
-                            _ => {
-                                let _ = class.write_packet(b"ERROR:TIMEOUT\r\n").await;
                             }
                         }
                     }
+                } else if cmd.starts_with(b"DOWNLOAD") || cmd.starts_with(b"download") {
+                    use core::fmt::Write;
+                    let _ = SD_CMD_CHANNEL.try_send(SdCommand::FindLatestFile);
+
+                    match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
+                        Ok(SdResponse::LatestFile(filename)) => {
+                            let _ = SD_CMD_CHANNEL.try_send(SdCommand::GetFileSize(filename.clone()));
+                            match with_timeout(Duration::from_millis(2000), SD_RESP_CHANNEL.receive()).await {
+                                Ok(SdResponse::FileSize(size)) => {
+                                    let mut header: heapless::String<64> = heapless::String::new();
+                                    let _ = write!(header, "FILE:{},{}\r\n", filename, size);
+                                    let _ = class.write_packet(header.as_bytes()).await;
+
+                                    let mut offset: u32 = 0;
+                                    let mut transfer_ok = true;
+
+                                    while offset < size && transfer_ok {
+                                        if SD_CMD_CHANNEL.try_send(SdCommand::ReadFileChunk(filename.clone(), offset)).is_err() {
+                                            transfer_ok = false;
+                                            continue;
+                                        }
+                                        Timer::after_millis(10).await;
+                                        match with_timeout(Duration::from_millis(5000), SD_RESP_CHANNEL.receive()).await {
+                                            Ok(SdResponse::FileChunk(data, bytes_read)) => {
+                                                if bytes_read == 0 { break; }
+                                                let mut sent = 0;
+                                                while sent < bytes_read && transfer_ok {
+                                                    let chunk_end = core::cmp::min(sent + 64, bytes_read);
+                                                    if class.write_packet(&data[sent..chunk_end]).await.is_err() {
+                                                        transfer_ok = false;
+                                                    }
+                                                    sent = chunk_end;
+                                                }
+                                                offset += bytes_read as u32;
+                                            }
+                                            _ => { transfer_ok = false; }
+                                        }
+                                    }
+
+                                    if transfer_ok {
+                                        let _ = class.write_packet(b"\r\nEOF\r\n").await;
+                                    } else {
+                                        let _ = class.write_packet(b"\r\nERROR:TRANSFER\r\n").await;
+                                    }
+                                }
+                                _ => {
+                                    let _ = class.write_packet(b"ERROR:SIZE\r\n").await;
+                                }
+                            }
+                        }
+                        Ok(SdResponse::NoFiles) => {
+                            let _ = class.write_packet(b"ERROR:NO_FILES\r\n").await;
+                        }
+                        Ok(SdResponse::NotInitialized) => {
+                            let _ = class.write_packet(b"ERROR:SD_NOT_INIT\r\n").await;
+                        }
+                        _ => {
+                            let _ = class.write_packet(b"ERROR:TIMEOUT\r\n").await;
+                        }
+                    }
                 }
-                Ok(_) => {}
-                Err(_) => break,
             }
         }
+
+        Timer::after_millis(100).await; // 10Hz
     }
 }

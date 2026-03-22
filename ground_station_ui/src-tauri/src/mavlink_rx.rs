@@ -7,8 +7,11 @@ use mavlink::ardupilotmega::MavMessage;
 use mavlink::MavConnection;
 use tauri::{AppHandle, Emitter};
 
+use crate::image_reassembler::ImageReassembler;
 use crate::session::SessionRecorder;
 use crate::telemetry::TelemetryState;
+
+pub type MavConn = Arc<Box<dyn MavConnection<MavMessage> + Sync + Send>>;
 
 pub fn spawn_receiver(
     addr: &str,
@@ -16,14 +19,15 @@ pub fn spawn_receiver(
     session: Arc<Mutex<SessionRecorder>>,
     stop: Arc<AtomicBool>,
     app: AppHandle,
-) -> Result<(), String> {
+) -> Result<MavConn, String> {
     let conn = mavlink::connect::<MavMessage>(addr)
         .map_err(|e| format!("Failed to connect: {e}"))?;
-    let conn = Arc::new(conn);
+    let conn: MavConn = Arc::new(Box::new(conn));
 
     let recv_conn = conn.clone();
     thread::spawn(move || {
         let mut last_emit = Instant::now();
+        let mut reassembler = ImageReassembler::new();
 
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -32,7 +36,32 @@ pub fn spawn_receiver(
 
             match recv_conn.recv() {
                 Ok((header, msg)) => {
-                    // Update state and maybe take a snapshot (release lock before emitting)
+                    // Handle image messages
+                    match &msg {
+                        MavMessage::DATA_TRANSMISSION_HANDSHAKE(data) => {
+                            reassembler.handle_handshake(
+                                data.size,
+                                data.width,
+                                data.height,
+                                data.packets,
+                                data.jpg_quality,
+                            );
+                            // Still update telemetry for bandwidth tracking
+                            state.lock().unwrap().update(&header, &msg);
+                            continue;
+                        }
+                        MavMessage::ENCAPSULATED_DATA(data) => {
+                            if let Some(jpeg) = reassembler.handle_data(data.seqnr, &data.data) {
+                                let event = reassembler.make_event(jpeg);
+                                let _ = app.emit("camera_frame", &event);
+                            }
+                            state.lock().unwrap().update(&header, &msg);
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // Regular telemetry handling
                     let snapshot = {
                         let mut st = state.lock().unwrap();
                         st.update(&header, &msg);
@@ -44,7 +73,6 @@ pub fn spawn_receiver(
                         }
                     };
 
-                    // Emit and record outside the state lock
                     if let Some(snapshot) = snapshot {
                         let _ = app.emit("telemetry", &snapshot);
 
@@ -71,8 +99,5 @@ pub fn spawn_receiver(
         }
     });
 
-    // Keep connection alive (it's held by the Arc in the thread)
-    drop(conn);
-
-    Ok(())
+    Ok(conn)
 }

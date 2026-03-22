@@ -123,6 +123,97 @@ button:disabled {
   background: rgba(68, 255, 68, 0.1);
 }
 
+/* Vehicle controls bar */
+.vehicle-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #0d1117;
+  border-bottom: 1px solid var(--panel-border);
+  font-size: 12px;
+}
+
+.vehicle-controls-label {
+  color: var(--text-dim);
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 11px;
+}
+
+.vehicle-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.stop-rec-btn {
+  background: rgba(255, 204, 0, 0.15);
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.stop-rec-btn:hover:not(:disabled) {
+  background: rgba(255, 204, 0, 0.3);
+}
+
+.stop-rec-btn.stopped {
+  background: rgba(68, 255, 68, 0.15);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.stop-rec-btn.stopped:hover:not(:disabled) {
+  background: rgba(68, 255, 68, 0.3);
+}
+
+.shutdown-btn {
+  background: rgba(255, 68, 68, 0.1);
+  border-color: rgba(255, 68, 68, 0.4);
+  color: var(--text-dim);
+}
+
+.shutdown-btn:hover:not(:disabled) {
+  background: rgba(255, 68, 68, 0.2);
+  color: var(--red);
+}
+
+.shutdown-btn.confirming {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  animation: pulse-confirm 0.8s ease-in-out infinite;
+}
+
+.reboot-btn {
+  background: rgba(255, 68, 68, 0.1);
+  border-color: rgba(255, 68, 68, 0.4);
+  color: var(--text-dim);
+}
+
+.reboot-btn:hover:not(:disabled) {
+  background: rgba(255, 68, 68, 0.2);
+  color: var(--red);
+}
+
+.reboot-btn.confirming {
+  background: var(--red);
+  border-color: var(--red);
+  color: #fff;
+  animation: pulse-confirm 0.8s ease-in-out infinite;
+}
+
+@keyframes pulse-confirm {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.vehicle-status {
+  color: var(--accent);
+  font-size: 11px;
+  margin-left: 4px;
+}
+
 /* Cursor banner — fixed height, never shifts layout */
 .cursor-banner {
   height: 26px;
@@ -286,6 +377,102 @@ main {
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Camera view */
+#camera-view {
+  margin-bottom: 8px;
+}
+
+.camera-placeholder {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.camera-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.camera-img {
+  max-width: 100%;
+  height: auto;
+  max-height: 360px;
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+
+/* Camera switcher buttons in header */
+.camera-switcher {
+  float: right;
+  display: inline-flex;
+  gap: 4px;
+}
+
+.cam-btn {
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border: 1px solid var(--panel-border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.cam-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cam-btn.active {
+  border-color: var(--green);
+  color: var(--green);
+  background: rgba(68, 255, 68, 0.15);
+}
+
+.cam-btn.switching {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.camera-img.switching {
+  opacity: 0.4;
+  transition: opacity 0.2s;
+}
+
+.camera-stats {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.camera-stats span {
+  white-space: nowrap;
+}
+
+/* Pico logger warning banner */
+.pico-warning {
+  grid-column: 1 / -1;
+  background: rgba(255, 68, 68, 0.15);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  color: var(--red);
+  text-align: center;
+  padding: 8px;
+  font-weight: bold;
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 /* Charts grid: 2 columns x 2 rows */

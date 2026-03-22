@@ -1,9 +1,67 @@
+use std::collections::HashSet;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 
 use crate::config::Config;
+
+/// Auto-detect USB video capture devices by scanning sysfs.
+/// Skips non-USB devices (sunxi-vin) and metadata nodes (takes only the
+/// lowest-numbered /dev/videoN per physical USB device).
+pub fn detect_cameras() -> Vec<String> {
+    let sysfs = "/sys/class/video4linux";
+    let Ok(entries) = std::fs::read_dir(sysfs) else {
+        eprintln!("[camera] Cannot read {sysfs}, falling back to manual config");
+        return Vec::new();
+    };
+
+    // Collect (dev_path, name, physical_device_path) tuples
+    let mut candidates: Vec<(String, String, String)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let dev_name = entry.file_name().to_string_lossy().to_string();
+
+        // Only consider /dev/videoN devices (skip v4l-subdev*, media*, etc.)
+        if !dev_name.starts_with("video") {
+            continue;
+        }
+
+        let name_file = entry.path().join("name");
+        let Ok(name) = std::fs::read_to_string(&name_file) else { continue };
+        let name = name.trim().to_string();
+
+        // Skip non-USB devices (SoC camera pipelines)
+        if name.contains("sunxi") || name.contains("Allwinner") || name.contains("vin_") {
+            continue;
+        }
+
+        let dev_path = format!("/dev/{dev_name}");
+
+        // Resolve physical device symlink to group capture + metadata nodes
+        let device_link = entry.path().join("device");
+        let phys = std::fs::read_link(&device_link)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        candidates.push((dev_path, name, phys));
+    }
+
+    // Sort by path so /dev/video1 comes before /dev/video2, etc.
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Take only the first (capture) node per physical USB device
+    let mut seen_phys = HashSet::new();
+    let mut devices = Vec::new();
+    for (dev_path, name, phys) in candidates {
+        if seen_phys.insert(phys) {
+            eprintln!("[camera] Detected: {dev_path} ({name})");
+            devices.push(dev_path);
+        }
+    }
+
+    devices
+}
 
 /// A single image frame ready for radio transmission.
 pub struct CameraFrame {
@@ -16,23 +74,29 @@ pub struct CameraFrame {
 
 pub struct CameraManager {
     ffmpeg_process: Child,
+    /// Label for log messages (e.g. "cam0", "cam1")
+    pub label: String,
 }
 
 impl CameraManager {
-    pub fn start(config: &Config) -> std::io::Result<(Self, mpsc::Receiver<CameraFrame>)> {
+    /// Start a camera that records locally at full resolution.
+    ///
+    /// If `with_stream` is true, also produces a low-res image pipe for radio
+    /// transmission and returns `Some(Receiver<CameraFrame>)`.
+    pub fn start(
+        config: &Config,
+        device: &str,
+        label: &str,
+        with_stream: bool,
+    ) -> std::io::Result<(Self, Option<mpsc::Receiver<CameraFrame>>)> {
         std::fs::create_dir_all(&config.recording_dir)?;
 
         let segment_pattern = format!(
-            "{}/seg_%Y%m%d_%H%M%S.ts",
-            config.recording_dir
+            "{}/{}_seg_%Y%m%d_%H%M%S.ts",
+            config.recording_dir, label
         );
 
         let use_webp = config.stream_format == "webp";
-
-        let vf = format!(
-            "scale={}:{},format=gray",
-            config.stream_width, config.stream_height
-        );
 
         let mut args: Vec<String> = Vec::new();
 
@@ -49,7 +113,7 @@ impl CameraManager {
             args.extend([
                 "-f".into(), "v4l2".into(),
                 "-framerate".into(), config.recording_fps.to_string(),
-                "-i".into(), config.camera_device.clone(),
+                "-i".into(), device.to_string(),
             ]);
         }
 
@@ -75,82 +139,103 @@ impl CameraManager {
             segment_pattern,
         ]);
 
-        // Output 2: low-res grayscale image stream to pipe
-        args.extend([
-            "-map".into(), "0:v".into(),
-            "-vf".into(), vf,
-        ]);
+        // Output 2 (optional): low-res grayscale image stream to pipe
+        if with_stream {
+            let vf = format!(
+                "scale={}:{},format=gray",
+                config.stream_width, config.stream_height
+            );
 
-        if use_webp {
             args.extend([
-                "-c:v".into(), "libwebp".into(),
-                "-quality".into(), config.jpeg_quality.to_string(),
-                "-r".into(), config.stream_fps.to_string(),
-                "-f".into(), "image2pipe".into(),
-                "pipe:1".into(),
+                "-map".into(), "0:v".into(),
+                "-vf".into(), vf,
             ]);
-        } else {
-            // JPEG fallback
-            let qscale = (31 - (config.jpeg_quality as u32 * 30 / 100)).max(1).min(31);
-            args.extend([
-                "-c:v".into(), "mjpeg".into(),
-                "-q:v".into(), qscale.to_string(),
-                "-r".into(), config.stream_fps.to_string(),
-                "-f".into(), "image2pipe".into(),
-                "-vcodec".into(), "mjpeg".into(),
-                "pipe:1".into(),
-            ]);
+
+            if use_webp {
+                args.extend([
+                    "-c:v".into(), "libwebp".into(),
+                    "-quality".into(), config.jpeg_quality.to_string(),
+                    "-r".into(), config.stream_fps.to_string(),
+                    "-f".into(), "image2pipe".into(),
+                    "pipe:1".into(),
+                ]);
+            } else {
+                let qscale = (31 - (config.jpeg_quality as u32 * 30 / 100)).max(1).min(31);
+                args.extend([
+                    "-c:v".into(), "mjpeg".into(),
+                    "-q:v".into(), qscale.to_string(),
+                    "-r".into(), config.stream_fps.to_string(),
+                    "-f".into(), "image2pipe".into(),
+                    "-vcodec".into(), "mjpeg".into(),
+                    "pipe:1".into(),
+                ]);
+            }
         }
 
-        eprintln!("[camera] launching: {} {}", config.ffmpeg_bin, args.join(" "));
+        eprintln!("[{label}] launching: {} {}", config.ffmpeg_bin, args.join(" "));
 
         let mut child = Command::new(&config.ffmpeg_bin)
             .args(&args)
-            .stdout(Stdio::piped())
+            .stdout(if with_stream { Stdio::piped() } else { Stdio::null() })
             .stderr(Stdio::piped())
             .spawn()?;
 
-        let stdout = child.stdout.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture ffmpeg stdout")
-        })?;
+        let frame_rx = if with_stream {
+            let stdout = child.stdout.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::Other, "Failed to capture ffmpeg stdout")
+            })?;
 
-        let (tx, rx) = mpsc::sync_channel::<CameraFrame>(2);
-        let width = config.stream_width as u16;
-        let height = config.stream_height as u16;
-        let quality = config.jpeg_quality;
+            let (tx, rx) = mpsc::sync_channel::<CameraFrame>(2);
+            let width = config.stream_width as u16;
+            let height = config.stream_height as u16;
+            let quality = config.jpeg_quality;
+            let log_label = label.to_string();
 
-        // Spawn stdout reader thread — parses image frames from pipe
-        thread::spawn(move || {
-            if use_webp {
-                parse_webp_stream(stdout, tx, width, height, quality);
-            } else {
-                parse_jpeg_stream(stdout, tx, width, height, quality);
-            }
-            eprintln!("[camera] stdout reader exited");
-        });
+            thread::spawn(move || {
+                if use_webp {
+                    parse_webp_stream(stdout, tx, width, height, quality);
+                } else {
+                    parse_jpeg_stream(stdout, tx, width, height, quality);
+                }
+                eprintln!("[{log_label}] stdout reader exited");
+            });
+
+            Some(rx)
+        } else {
+            None
+        };
 
         // Spawn stderr reader thread — log ffmpeg output
         if let Some(stderr) = child.stderr.take() {
+            let log_label = label.to_string();
             thread::spawn(move || {
                 let reader = std::io::BufReader::new(stderr);
                 use std::io::BufRead;
                 for line in reader.lines() {
                     match line {
-                        Ok(line) => eprintln!("[ffmpeg] {line}"),
+                        Ok(line) => eprintln!("[{log_label}-ffmpeg] {line}"),
                         Err(_) => break,
                     }
                 }
             });
         }
 
-        Ok((Self { ffmpeg_process: child }, rx))
+        Ok((
+            Self {
+                ffmpeg_process: child,
+                label: label.to_string(),
+            },
+            frame_rx,
+        ))
     }
 }
 
 impl Drop for CameraManager {
     fn drop(&mut self) {
+        eprintln!("[{}] Stopping camera recording...", self.label);
         let _ = self.ffmpeg_process.kill();
         let _ = self.ffmpeg_process.wait();
+        eprintln!("[{}] Camera recording stopped.", self.label);
     }
 }
 

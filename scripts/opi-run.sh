@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
-# Start flight_computer on Orange Pi 4A over UART4.
-# Usage: ./scripts/opi-run.sh [IP] [USER] [PASS] [UART_DEV]
+# Start/restart flight_computer on Orange Pi 4A via systemd.
+# Usage: ./scripts/opi-run.sh [IP] [USER] [PASS]
 set -euo pipefail
 
 IP="${1:-172.31.255.248}"
 USER="${2:-orangepi}"
 PASS="${3:-orangepi}"
-UART="${4:-/dev/ttyAS4}"
-BAUD="${5:-115200}"
 
 SSH="sshpass -p $PASS ssh -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no $USER@$IP"
 
-echo "=== Starting flight_computer on $UART @ $BAUD ==="
-$SSH "killall flight_computer 2>/dev/null; true"
-$SSH "echo '$PASS' | sudo -S chmod 666 $UART 2>/dev/null"
-$SSH "nohup ~/flight_computer --mavlink-addr serial:${UART}:${BAUD} > ~/fc.log 2>&1 & disown"
+echo "=== Ensuring UART permissions ==="
+$SSH "echo '$PASS' | sudo -S chmod 666 /dev/ttyAS4 /dev/ttyAS2 2>/dev/null; true"
+
+echo "=== Restarting flight_computer service ==="
+$SSH "echo '$PASS' | sudo -S systemctl restart flight_computer"
 
 sleep 2
-$SSH 'pgrep -a flight_computer && echo "" && head -5 ~/fc.log'
+$SSH "systemctl status flight_computer --no-pager -l 2>/dev/null | head -15"
 echo ""
 echo "=== flight_computer running. View logs: ssh $USER@$IP tail -f ~/fc.log ==="

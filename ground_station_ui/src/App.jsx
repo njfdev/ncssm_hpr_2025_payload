@@ -6,6 +6,8 @@ import TelemetryPanels from "./TelemetryPanels.jsx";
 import ChartControls from "./ChartControls.jsx";
 import Charts from "./Charts.jsx";
 import SessionControls from "./SessionControls.jsx";
+import CameraView from "./CameraView.jsx";
+import VehicleControls from "./VehicleControls.jsx";
 
 const MAX_ROLLING = 60000; // ~50 min at 20Hz
 
@@ -16,11 +18,17 @@ export const EMPTY_SNAPSHOT = {
   pressure_hpa: 0, temperature_c: 0, baro_alt: 0,
   accel_x: 0, accel_y: 0, accel_z: 0,
   gyro_x: 0, gyro_y: 0, gyro_z: 0,
+  roll: 0, pitch: 0, yaw: 0,
   mag_x: 0, mag_y: 0, mag_z: 0,
   mav_type: "Unknown", system_status: "Unknown",
   connected: false, msg_count: 0, heartbeat_age_secs: null,
   msg_rate: 0, bytes_per_sec: 0, max_bytes_per_sec: 0,
   bandwidth_pct: 0, packet_loss_pct: 0,
+  pico_connected: true,
+  camera_recording: false,
+  audio_recording: false,
+  camera_count: 0,
+  stream_camera: 0,
 };
 
 export default function App() {
@@ -221,6 +229,7 @@ export default function App() {
           onSessionLoaded={handleSessionLoaded}
         />
       </header>
+      <VehicleControls connected={connected} />
 
       <div className={`cursor-banner${cursorSnapshot != null ? " visible" : ""}`}>
         {cursorSnapshot != null
@@ -230,6 +239,11 @@ export default function App() {
 
       <main>
         <TelemetryPanels snapshot={displaySnapshot} />
+        <CameraView
+          connected={connected}
+          cameraCount={displaySnapshot.camera_count}
+          streamCamera={displaySnapshot.stream_camera}
+        />
         <ChartControls
           windowSec={windowSec}
           isLive={isLive}

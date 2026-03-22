@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 mavlink = { version = "0.17", features = ["ardupilotmega", "udp", "direct-serial"] }
 serialport = { version = "4", default-features = false }
+chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
+payload_types = { path = "../payload_types", features = ["std"] }

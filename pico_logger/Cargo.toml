@@ -22,3 +22,4 @@ embedded-hal = "1.0"
 embedded-hal-bus = "0.2"
 embedded-sdmmc = "0.8"
 libm = "0.2"
+payload_types = { path = "../payload_types" }
