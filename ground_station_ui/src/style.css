@@ -167,6 +167,16 @@ button:disabled {
   background: rgba(68, 255, 68, 0.3);
 }
 
+.calibrate-btn {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: rgba(0, 212, 255, 0.4);
+  color: var(--accent);
+}
+
+.calibrate-btn:hover:not(:disabled) {
+  background: rgba(0, 212, 255, 0.25);
+}
+
 .shutdown-btn {
   background: rgba(255, 68, 68, 0.1);
   border-color: rgba(255, 68, 68, 0.4);

@@ -115,6 +115,8 @@ fn send_vehicle_command(cmd: String, state: State<'_, AppState>) -> Result<(), S
         "start" => ("stop_rec", 0),
         "shutdown" => ("shutdown", 1),
         "reboot" => ("reboot", 1),
+        "calibrate_gyro" => ("cal_gyro", 1),
+        "reset_orientation" => ("rst_ori", 1),
         s if s.starts_with("switch_cam:") => {
             let idx: i32 = s[11..].parse().map_err(|_| "Invalid camera index")?;
             ("sw_cam", idx)

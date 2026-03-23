@@ -1,0 +1,10 @@
+[package]
+name = "telemetry_tester"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+payload_types = { path = "../payload_types", features = ["std"] }
+serialport = "4"
+clap = { version = "4", features = ["derive"] }
+rand = "0.9"

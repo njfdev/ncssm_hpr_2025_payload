@@ -5,6 +5,7 @@ mod config;
 mod frame_sender;
 mod pico_rx;
 
+use std::io::Write;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -287,6 +288,10 @@ fn main() {
     let audio_mgr: Arc<Mutex<Option<audio::AudioRecorder>>> = Arc::new(Mutex::new(None));
     let stream_camera_idx = Arc::new(AtomicUsize::new(config.stream_camera));
 
+    // Orientation bias (subtracted from Pico values for reset-to-zero)
+    let mut orient_bias = (0.0f32, 0.0f32, 0.0f32);
+
+
     // Resolve camera device list (auto-detect if none specified)
     let camera_devices: Vec<String> = if config.camera_devices.is_empty() {
         let detected = camera::detect_cameras();
@@ -329,21 +334,21 @@ fn main() {
     }
 
     // Start pico logger reader if enabled
-    let pico_state = if !config.no_pico {
+    let (pico_state, pico_tx) = if !config.no_pico {
         match pico_rx::spawn_pico_reader(&config.pico_uart, config.pico_baud, &config.recording_dir) {
-            Ok(state) => {
+            Ok((state, tx)) => {
                 println!("Pico reader started on {} @ {}", config.pico_uart, config.pico_baud);
-                Some(state)
+                (Some(state), Some(tx))
             }
             Err(e) => {
                 eprintln!("WARNING: Failed to start pico reader: {e}");
                 eprintln!("Continuing without pico logger.");
-                None
+                (None, None)
             }
         }
     } else {
         println!("Pico reader disabled (--no-pico)");
-        None
+        (None, None)
     };
 
     // Start command receiver on radio link (reads MAVLink from cloned serial port)
@@ -365,10 +370,39 @@ fn main() {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 VehicleCommand::StopRecording => {
-                    println!("[main] Stopping data collection...");
+                    println!("[main] Stopping all local logging...");
                     camera_mgrs.lock().unwrap().clear(); // Drop kills all ffmpeg processes
                     audio_mgr.lock().unwrap().take();
-                    println!("[main] Data collection stopped. Safe to power off.");
+                    if let Some(ref ps) = pico_state {
+                        ps.lock().unwrap().logging_enabled = false;
+                    }
+                    println!("[main] All logging stopped. Safe to power off.");
+                }
+                VehicleCommand::CalibrateGyro => {
+                    println!("[main] Sending calibrate command to Pico...");
+                    if let Some(ref tx) = pico_tx {
+                        let mut tx = tx.lock().unwrap();
+                        if let Err(e) = tx.write_all(b"CAL\n") {
+                            eprintln!("[main] Failed to send calibrate to Pico: {e}");
+                        } else {
+                            println!("[main] Calibrate command sent to Pico.");
+                        }
+                    }
+                }
+                VehicleCommand::ResetOrientation => {
+                    if let Some(ref ps) = pico_state {
+                        if let Some(pkt) = ps.lock().unwrap().latest {
+                            orient_bias = (
+                                pkt.roll_cdeg as f32 / 100.0,
+                                pkt.pitch_cdeg as f32 / 100.0,
+                                pkt.yaw_cdeg as f32 / 100.0,
+                            );
+                            println!(
+                                "[main] Orientation reset: bias=({:.1}, {:.1}, {:.1})",
+                                orient_bias.0, orient_bias.1, orient_bias.2
+                            );
+                        }
+                    }
                 }
                 VehicleCommand::SwitchCamera(idx) => {
                     let cam_count = camera_devices.len();
@@ -386,7 +420,7 @@ fn main() {
                     }
                 }
                 VehicleCommand::StartRecording => {
-                    println!("[main] Starting data collection...");
+                    println!("[main] Starting all local logging...");
                     if camera_mgrs.lock().unwrap().is_empty() && !config.no_camera {
                         start_cameras(&config, &camera_devices, stream_camera_idx.load(Ordering::Relaxed), &mav, &camera_mgrs);
                     }
@@ -399,7 +433,10 @@ fn main() {
                             Err(e) => eprintln!("[main] Audio restart failed: {e}"),
                         }
                     }
-                    println!("[main] Data collection started.");
+                    if let Some(ref ps) = pico_state {
+                        ps.lock().unwrap().logging_enabled = true;
+                    }
+                    println!("[main] All logging started.");
                 }
                 VehicleCommand::Shutdown => {
                     println!("[main] Shutdown requested. Stopping recording first...");
@@ -482,13 +519,13 @@ fn main() {
                 "pressure"
             );
 
-            // Orientation from integrated gyro
+            // Orientation from integrated gyro (with reset bias applied)
             send_or_log!(
                 &MavMessage::ATTITUDE(ATTITUDE_DATA {
                     time_boot_ms,
-                    roll: (pkt.roll_cdeg as f32 / 100.0).to_radians(),
-                    pitch: (pkt.pitch_cdeg as f32 / 100.0).to_radians(),
-                    yaw: (pkt.yaw_cdeg as f32 / 100.0).to_radians(),
+                    roll: (pkt.roll_cdeg as f32 / 100.0 - orient_bias.0).to_radians(),
+                    pitch: (pkt.pitch_cdeg as f32 / 100.0 - orient_bias.1).to_radians(),
+                    yaw: (pkt.yaw_cdeg as f32 / 100.0 - orient_bias.2).to_radians(),
                     rollspeed: 0.0,
                     pitchspeed: 0.0,
                     yawspeed: 0.0,
@@ -605,6 +642,19 @@ fn main() {
                 value: if aud_recording { 1 } else { 0 },
             }),
             "aud_rec"
+        );
+
+        // Telemetry CSV logging status
+        let csv_logging = pico_state.as_ref().map_or(false, |ps| ps.lock().unwrap().logging_enabled);
+        let mut csv_name = [0u8; 10];
+        csv_name[..7].copy_from_slice(b"csv_log");
+        send_or_log!(
+            &MavMessage::NAMED_VALUE_INT(NAMED_VALUE_INT_DATA {
+                time_boot_ms,
+                name: csv_name.into(),
+                value: if csv_logging { 1 } else { 0 },
+            }),
+            "csv_log"
         );
 
         // Camera count

@@ -74,13 +74,10 @@ impl OrientationTracker {
         self.orientation.pitch += gyro_y * dt;
         self.orientation.yaw += gyro_z * dt;
 
-        // Normalize yaw to [-180, 180]
-        while self.orientation.yaw > 180.0 {
-            self.orientation.yaw -= 360.0;
-        }
-        while self.orientation.yaw < -180.0 {
-            self.orientation.yaw += 360.0;
-        }
+        // Normalize all angles to [-180, 180]
+        self.orientation.roll = normalize_angle(self.orientation.roll);
+        self.orientation.pitch = normalize_angle(self.orientation.pitch);
+        self.orientation.yaw = normalize_angle(self.orientation.yaw);
 
         self.orientation
     }
@@ -109,4 +106,14 @@ impl OrientationTracker {
 
         self.initialized = false; // Will be set true on first update() call
     }
+}
+
+fn normalize_angle(mut angle: f32) -> f32 {
+    while angle > 180.0 {
+        angle -= 360.0;
+    }
+    while angle < -180.0 {
+        angle += 360.0;
+    }
+    angle
 }

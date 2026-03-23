@@ -10,7 +10,7 @@ use super::types::{SensorData, ImuCalibration};
 use super::lsm6dsox;
 
 /// Number of samples to average during calibration
-const CALIBRATION_SAMPLES: u32 = 100;
+const CALIBRATION_SAMPLES: u32 = 200;
 
 /// Delay between calibration samples in milliseconds
 const CALIBRATION_DELAY_MS: u64 = 10;

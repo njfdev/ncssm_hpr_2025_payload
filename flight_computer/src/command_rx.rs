@@ -12,6 +12,8 @@ pub enum VehicleCommand {
     Shutdown,
     Reboot,
     SwitchCamera(usize),
+    CalibrateGyro,
+    ResetOrientation,
 }
 
 pub fn spawn_command_receiver(
@@ -41,6 +43,8 @@ pub fn spawn_command_receiver(
                             ("shutdown", 1) => Some(VehicleCommand::Shutdown),
                             ("reboot", 1)   => Some(VehicleCommand::Reboot),
                             ("sw_cam", idx)  => Some(VehicleCommand::SwitchCamera(idx as usize)),
+                            ("cal_gyro", 1)  => Some(VehicleCommand::CalibrateGyro),
+                            ("rst_ori", 1)   => Some(VehicleCommand::ResetOrientation),
                             _ => None,
                         };
 

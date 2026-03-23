@@ -27,6 +27,7 @@ export const EMPTY_SNAPSHOT = {
   pico_connected: true,
   camera_recording: false,
   audio_recording: false,
+  csv_logging: false,
   camera_count: 0,
   stream_camera: 0,
 };

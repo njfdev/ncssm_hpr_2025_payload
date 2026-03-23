@@ -8,7 +8,7 @@ mod telemetry;
 use embassy_executor::Spawner;
 use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::{self, I2c, Config as I2cConfig};
-use embassy_rp::uart::{self, UartTx, UartRx, Config as UartConfig};
+use embassy_rp::uart::{self, Async, UartTx, UartRx, Config as UartConfig};
 use embedded_hal_async::i2c::I2c as I2cTrait;
 use embassy_rp::peripherals::{USB, I2C0, I2C1, SPI0, PIN_18, PIN_19, PIN_20, PIN_23, UART0, UART1};
 use embassy_rp::rom_data::reset_to_usb_boot;
@@ -91,6 +91,9 @@ pub enum SdResponse {
     /// File size
     FileSize(u32),
 }
+
+// Signal from UART command listener to main loop
+static CALIBRATE_SIGNAL: Channel<CriticalSectionRawMutex, (), 1> = Channel::new();
 
 // Channels for core0 <-> core1 communication
 // Command channel: core0 sends commands to core1
@@ -253,6 +256,33 @@ async fn usb_task(mut usb: UsbDevice<'static, Driver<'static, USB>>) {
     usb.run().await;
 }
 
+/// Listen for commands from the flight computer on UART0 RX.
+/// Supports: "CAL\n" — trigger gyro calibration and orientation reset.
+#[embassy_executor::task]
+async fn uart_cmd_listener(mut rx: UartRx<'static, Async>) {
+    let mut buf = [0u8; 16];
+    let mut pos = 0usize;
+    loop {
+        let mut byte = [0u8; 1];
+        match rx.read(&mut byte).await {
+            Ok(()) => {
+                if byte[0] == b'\n' || byte[0] == b'\r' {
+                    if pos >= 3 && &buf[..3] == b"CAL" {
+                        let _ = CALIBRATE_SIGNAL.try_send(());
+                    }
+                    pos = 0;
+                } else if pos < buf.len() {
+                    buf[pos] = byte[0];
+                    pos += 1;
+                }
+            }
+            Err(_) => {
+                Timer::after_millis(10).await;
+            }
+        }
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -317,10 +347,12 @@ async fn main(spawner: Spawner) {
     // I2C1 for Barometer (BMP390) + ENS160: SCL=GP3, SDA=GP2
     let mut i2c1 = I2c::new_async(p.I2C1, p.PIN_3, p.PIN_2, Irqs, i2c_config);
 
-    // UART0 for telemetry output to flight computer: TX=GP0, 115200 baud
+    // UART0 for communication with flight computer: TX=GP0, RX=GP1, 115200 baud
     let mut uart_config = UartConfig::default();
     uart_config.baudrate = 115200;
-    let mut uart_tx = UartTx::new(p.UART0, p.PIN_0, p.DMA_CH0, uart_config);
+    let uart0 = uart::Uart::new(p.UART0, p.PIN_0, p.PIN_1, Irqs, p.DMA_CH0, p.DMA_CH2, uart_config);
+    let (mut uart_tx, uart_rx) = uart0.split();
+    spawner.spawn(uart_cmd_listener(uart_rx)).unwrap();
 
     // UART1 RX for UBlox GPS: RX=GP25 (D25), 38400 baud (UBlox M10 default)
     let mut gps_uart_config = UartConfig::default();
@@ -376,6 +408,14 @@ async fn main(spawner: Spawner) {
         counter = counter.wrapping_add(1);
         let elapsed_ms = telemetry_start.elapsed().as_millis();
         orientation_tracker.update(elapsed_ms, &sensor_data, &imu_calib);
+
+        // Check for calibration command from flight computer
+        if CALIBRATE_SIGNAL.try_receive().is_ok() {
+            if let Ok(calib) = sensors::calibration::calibrate_imu(&mut i2c0).await {
+                imu_calib = calib;
+                orientation_tracker.init_from_accel(&sensor_data, &imu_calib);
+            }
+        }
 
         // Always send UART telemetry to flight computer (10Hz)
         {

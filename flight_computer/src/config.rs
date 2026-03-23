@@ -40,7 +40,7 @@ pub struct Config {
     pub stream_format: String,
 
     /// MPEG-TS segment duration in seconds (lower = more power-safe)
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 30)]
     pub segment_duration: u32,
 
     /// Radio stream output FPS from ffmpeg (actual send rate is bandwidth-limited)
@@ -88,10 +88,10 @@ pub struct Config {
     pub no_audio: bool,
 
     /// Audio input format for ffmpeg (e.g. "pulse", "alsa")
-    #[arg(long, default_value = "pulse")]
+    #[arg(long, default_value = "alsa")]
     pub audio_format: String,
 
-    /// Audio input device for ffmpeg
-    #[arg(long, default_value = "default")]
+    /// Audio input device for ffmpeg (e.g. "hw:4,0" for UMM-6 mic)
+    #[arg(long, default_value = "hw:4,0")]
     pub audio_device: String,
 }

@@ -75,6 +75,7 @@ pub struct TelemetryState {
     // Recording status from flight computer
     pub camera_recording: bool,
     pub audio_recording: bool,
+    pub csv_logging: bool,
 
     // Camera switching
     pub camera_count: u32,
@@ -152,6 +153,7 @@ pub struct TelemetrySnapshot {
     // Recording status from flight computer
     pub camera_recording: bool,
     pub audio_recording: bool,
+    pub csv_logging: bool,
 
     // Camera switching
     pub camera_count: u32,
@@ -212,6 +214,7 @@ impl TelemetryState {
 
             camera_recording: false,
             audio_recording: false,
+            csv_logging: false,
 
             camera_count: 0,
             stream_camera: 0,
@@ -314,6 +317,8 @@ impl TelemetryState {
                     self.camera_recording = data.value != 0;
                 } else if data.name.starts_with(b"aud_rec") {
                     self.audio_recording = data.value != 0;
+                } else if data.name.starts_with(b"csv_log") {
+                    self.csv_logging = data.value != 0;
                 } else if data.name.starts_with(b"cam_cnt") {
                     self.camera_count = data.value as u32;
                 } else if data.name.starts_with(b"cam_idx") {
@@ -379,6 +384,7 @@ impl TelemetryState {
             pico_connected: self.pico_connected,
             camera_recording: self.camera_recording,
             audio_recording: self.audio_recording,
+            csv_logging: self.csv_logging,
             camera_count: self.camera_count,
             stream_camera: self.stream_camera,
         }

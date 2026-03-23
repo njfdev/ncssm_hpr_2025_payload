@@ -134,6 +134,11 @@ const TelemetryPanels = memo(function TelemetryPanels({ snapshot: s }) {
             color={s.audio_recording ? "var(--green)" : "var(--red)"}
           />
           <Field
+            label="Telemetry CSV:"
+            value={s.csv_logging ? "Logging" : "Stopped"}
+            color={s.csv_logging ? "var(--green)" : "var(--red)"}
+          />
+          <Field
             label="Uptime:"
             value={s.connected ? formatUptime(n(s.timestamp_ms)) : "--"}
           />

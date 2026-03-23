@@ -41,6 +41,22 @@ export default function VehicleControls({ connected }) {
         {recording ? "Stop Recording" : "Start Recording"}
       </button>
       <button
+        className="vehicle-btn calibrate-btn"
+        onClick={() => sendCommand("calibrate_gyro", "Gyro calibrated")}
+        disabled={!connected}
+        title="Calibrate gyro bias (device must be stationary)"
+      >
+        Calibrate Gyro
+      </button>
+      <button
+        className="vehicle-btn calibrate-btn"
+        onClick={() => sendCommand("reset_orientation", "Orientation reset")}
+        disabled={!connected}
+        title="Zero orientation to current position"
+      >
+        Reset Orientation
+      </button>
+      <button
         className={`vehicle-btn shutdown-btn${confirming === "shutdown" ? " confirming" : ""}`}
         onClick={() => handleDangerous("shutdown", "Shutdown")}
         disabled={!connected}

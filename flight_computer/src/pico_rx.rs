@@ -10,6 +10,7 @@ pub struct PicoState {
     pub latest: Option<TelemetryPacket>,
     pub last_received: Instant,
     pub connected: bool,
+    pub logging_enabled: bool,
 }
 
 impl PicoState {
@@ -18,6 +19,7 @@ impl PicoState {
             latest: None,
             last_received: Instant::now(),
             connected: false,
+            logging_enabled: true,
         }
     }
 
@@ -26,17 +28,24 @@ impl PicoState {
     }
 }
 
+pub type PicoTx = Arc<Mutex<Box<dyn Write + Send>>>;
+
 pub fn spawn_pico_reader(
     uart_path: &str,
     baud: u32,
     data_dir: &str,
-) -> Result<Arc<Mutex<PicoState>>, String> {
+) -> Result<(Arc<Mutex<PicoState>>, PicoTx), String> {
     let state = Arc::new(Mutex::new(PicoState::new()));
 
     let port = serialport::new(uart_path, baud)
         .timeout(Duration::from_millis(100))
         .open()
         .map_err(|e| format!("Failed to open pico UART {uart_path}: {e}"))?;
+
+    let write_port: Box<dyn Write + Send> = Box::new(
+        port.try_clone().map_err(|e| format!("Failed to clone pico UART: {e}"))?
+    );
+    let pico_tx: PicoTx = Arc::new(Mutex::new(write_port));
 
     // Create CSV log file for redundant telemetry recording
     let log_path = format!(
@@ -59,7 +68,7 @@ pub fn spawn_pico_reader(
             writer,
             "counter,timestamp_ms,pressure_pa,temp_cdeg,\
              accel_x,accel_y,accel_z,gyro_x,gyro_y,gyro_z,\
-             mag_x,mag_y,mag_z,aqi,tvoc_ppb,eco2_ppm,\
+             mag_x,mag_y,mag_z,roll_cdeg,pitch_cdeg,yaw_cdeg,aqi,tvoc_ppb,eco2_ppm,\
              gps_lat_e7,gps_lon_e7,gps_alt_mm,gps_fix,gps_sats,gps_hdop_e2,gps_speed_cms,gps_course_e2"
         );
         let _ = writer.flush();
@@ -79,35 +88,43 @@ pub fn spawn_pico_reader(
                             if !frame_buf.is_empty() {
                                 frame_buf.push(0x00);
                                 if let Ok(packet) = TelemetryPacket::decode_cobs(&mut frame_buf) {
-                                    // Write to CSV log
-                                    let _ = writeln!(
-                                        writer,
-                                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
-                                        packet.counter,
-                                        packet.timestamp_ms,
-                                        packet.pressure_pa,
-                                        packet.temp_cdeg,
-                                        packet.accel_x,
-                                        packet.accel_y,
-                                        packet.accel_z,
-                                        packet.gyro_x,
-                                        packet.gyro_y,
-                                        packet.gyro_z,
-                                        packet.mag_x,
-                                        packet.mag_y,
-                                        packet.mag_z,
-                                        packet.aqi,
-                                        packet.tvoc_ppb,
-                                        packet.eco2_ppm,
-                                        packet.gps_lat_e7,
-                                        packet.gps_lon_e7,
-                                        packet.gps_alt_mm,
-                                        packet.gps_fix,
-                                        packet.gps_sats,
-                                        packet.gps_hdop_e2,
-                                        packet.gps_speed_cms,
-                                        packet.gps_course_e2,
-                                    );
+                                    // Write to CSV log (if logging enabled)
+                                    {
+                                        let st = state_clone.lock().unwrap();
+                                        if st.logging_enabled {
+                                            let _ = writeln!(
+                                                writer,
+                                                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                                                packet.counter,
+                                                packet.timestamp_ms,
+                                                packet.pressure_pa,
+                                                packet.temp_cdeg,
+                                                packet.accel_x,
+                                                packet.accel_y,
+                                                packet.accel_z,
+                                                packet.gyro_x,
+                                                packet.gyro_y,
+                                                packet.gyro_z,
+                                                packet.mag_x,
+                                                packet.mag_y,
+                                                packet.mag_z,
+                                                packet.roll_cdeg,
+                                                packet.pitch_cdeg,
+                                                packet.yaw_cdeg,
+                                                packet.aqi,
+                                                packet.tvoc_ppb,
+                                                packet.eco2_ppm,
+                                                packet.gps_lat_e7,
+                                                packet.gps_lon_e7,
+                                                packet.gps_alt_mm,
+                                                packet.gps_fix,
+                                                packet.gps_sats,
+                                                packet.gps_hdop_e2,
+                                                packet.gps_speed_cms,
+                                                packet.gps_course_e2,
+                                            );
+                                        }
+                                    }
 
                                     let mut st = state_clone.lock().unwrap();
                                     st.latest = Some(packet);
@@ -155,5 +172,5 @@ pub fn spawn_pico_reader(
         }
     });
 
-    Ok(state)
+    Ok((state, pico_tx))
 }
