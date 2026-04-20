@@ -291,23 +291,32 @@ impl TelemetryState {
             }
 
             MavMessage::GPS_RAW_INT(data) => {
-                self.lat = data.lat as f64 / 1e7;
-                self.lon = data.lon as f64 / 1e7;
-                self.gps_alt = data.alt as f64 / 1000.0;
                 self.satellites = data.satellites_visible;
-                self.hdop = data.eph as f32 / 100.0;
+                self.hdop = if data.eph != u16::MAX { data.eph as f32 / 100.0 } else { 0.0 };
                 self.fix_type = match data.fix_type {
-                    GpsFixType::GPS_FIX_TYPE_NO_GPS => "No GPS",
-                    GpsFixType::GPS_FIX_TYPE_NO_FIX => "No Fix",
-                    GpsFixType::GPS_FIX_TYPE_2D_FIX => "2D Fix",
-                    GpsFixType::GPS_FIX_TYPE_3D_FIX => "3D Fix",
-                    GpsFixType::GPS_FIX_TYPE_DGPS => "DGPS",
-                    GpsFixType::GPS_FIX_TYPE_RTK_FLOAT => "RTK Float",
-                    GpsFixType::GPS_FIX_TYPE_RTK_FIXED => "RTK Fixed",
-                    GpsFixType::GPS_FIX_TYPE_STATIC => "Static",
-                    GpsFixType::GPS_FIX_TYPE_PPP => "PPP",
+                    GpsFixType::GPS_FIX_TYPE_NO_GPS => "No GPS".into(),
+                    GpsFixType::GPS_FIX_TYPE_NO_FIX => {
+                        if data.satellites_visible > 0 {
+                            format!("Searching ({} sats)", data.satellites_visible)
+                        } else {
+                            "No Fix".into()
+                        }
+                    }
+                    GpsFixType::GPS_FIX_TYPE_2D_FIX => "2D Fix".into(),
+                    GpsFixType::GPS_FIX_TYPE_3D_FIX => "3D Fix".into(),
+                    GpsFixType::GPS_FIX_TYPE_DGPS => "DGPS".into(),
+                    GpsFixType::GPS_FIX_TYPE_RTK_FLOAT => "RTK Float".into(),
+                    GpsFixType::GPS_FIX_TYPE_RTK_FIXED => "RTK Fixed".into(),
+                    GpsFixType::GPS_FIX_TYPE_STATIC => "Static".into(),
+                    GpsFixType::GPS_FIX_TYPE_PPP => "PPP".into(),
+                };
+                if data.fix_type != GpsFixType::GPS_FIX_TYPE_NO_GPS
+                    && data.fix_type != GpsFixType::GPS_FIX_TYPE_NO_FIX
+                {
+                    self.lat = data.lat as f64 / 1e7;
+                    self.lon = data.lon as f64 / 1e7;
+                    self.gps_alt = data.alt as f64 / 1000.0;
                 }
-                .into();
             }
 
             MavMessage::NAMED_VALUE_INT(data) => {

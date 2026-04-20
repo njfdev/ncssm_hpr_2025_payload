@@ -567,8 +567,9 @@ fn main() {
         if let Some(ref pkt) = pico_data.filter(|_| pico_connected) {
             let fix_type = match pkt.gps_fix {
                 0 => GpsFixType::GPS_FIX_TYPE_NO_FIX,
-                1 => GpsFixType::GPS_FIX_TYPE_3D_FIX,
-                2 => GpsFixType::GPS_FIX_TYPE_DGPS,
+                1 => GpsFixType::GPS_FIX_TYPE_2D_FIX, // GGA quality 1 = standard GPS, may be 2D
+                2 => GpsFixType::GPS_FIX_TYPE_3D_FIX, // GGA quality 2 = DGPS (always 3D)
+                3 => GpsFixType::GPS_FIX_TYPE_DGPS,
                 4 => GpsFixType::GPS_FIX_TYPE_RTK_FIXED,
                 5 => GpsFixType::GPS_FIX_TYPE_RTK_FLOAT,
                 _ => GpsFixType::GPS_FIX_TYPE_NO_FIX,

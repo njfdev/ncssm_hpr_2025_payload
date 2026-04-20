@@ -106,12 +106,16 @@ fn parse_gga(data: &[u8]) {
     let alt_raw = f.next();     // 8: altitude (meters)
 
     let fix = parse_u32(fix_raw) as u8;
+    let sats = parse_u32(sats_raw) as u8;
+    let hdop_e2 = parse_fixed_u16(hdop_raw, 2);
+
     if fix == 0 {
-        // No fix — clear position but keep fix=0
+        // No fix — keep satellite count so the UI can show GPS is searching
         GPS_STATE.lock(|c| {
             let mut d = c.get();
             d.fix_quality = 0;
-            d.satellites = 0;
+            d.satellites = sats;
+            d.hdop_e2 = hdop_e2;
             c.set(d);
         });
         return;
@@ -119,9 +123,7 @@ fn parse_gga(data: &[u8]) {
 
     let lat_e7 = parse_nmea_coord(lat_raw, first_byte(lat_hem), true);
     let lon_e7 = parse_nmea_coord(lon_raw, first_byte(lon_hem), false);
-    let alt_mm = parse_fixed_i32(alt_raw, 3); // meters → mm (3 extra decimal places)
-    let sats = parse_u32(sats_raw) as u8;
-    let hdop_e2 = parse_fixed_u16(hdop_raw, 2);
+    let alt_mm = parse_fixed_i32(alt_raw, 3);
 
     GPS_STATE.lock(|c| {
         let mut d = c.get();

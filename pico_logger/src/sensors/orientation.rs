@@ -1,13 +1,15 @@
 /// Orientation Tracking Module
 ///
-/// Tracks device orientation by integrating gyroscope readings over time.
-/// Uses simple Euler angle integration (suitable for short-duration flights).
-///
-/// For long-duration or high-accuracy applications, consider implementing
-/// a complementary filter or Madgwick/Mahony AHRS algorithm that fuses
-/// accelerometer and magnetometer data.
+/// Tracks device orientation using a complementary filter that fuses
+/// gyroscope integration with accelerometer-derived roll/pitch.
+/// Gyro provides smooth, fast response. Accel corrects long-term drift.
+/// Alpha = 0.98: trust gyro 98%, nudge toward accel 2% each update.
 
 use super::types::{SensorData, ImuCalibration, Orientation};
+
+/// Complementary filter coefficient.
+/// Higher = trust gyro more (smoother but slower drift correction).
+const ALPHA: f32 = 0.98;
 
 /// Orientation tracker that integrates gyroscope data
 #[derive(Default)]
@@ -67,17 +69,22 @@ impl OrientationTracker {
         let gyro_y = data.gyro_y_calibrated(calib);
         let gyro_z = data.gyro_z_calibrated(calib);
 
-        // Simple Euler angle integration
-        // Note: This works well for small angles and short durations
-        // For large rotations, quaternions would be more accurate
-        self.orientation.roll += gyro_x * dt;
-        self.orientation.pitch += gyro_y * dt;
-        self.orientation.yaw += gyro_z * dt;
+        // Gyro integration
+        let gyro_roll = self.orientation.roll + gyro_x * dt;
+        let gyro_pitch = self.orientation.pitch + gyro_y * dt;
 
-        // Normalize all angles to [-180, 180]
-        self.orientation.roll = normalize_angle(self.orientation.roll);
-        self.orientation.pitch = normalize_angle(self.orientation.pitch);
-        self.orientation.yaw = normalize_angle(self.orientation.yaw);
+        // Accelerometer-derived roll/pitch (absolute, no drift)
+        let ax = data.accel_x_calibrated(calib);
+        let ay = data.accel_y_calibrated(calib);
+        let az = data.accel_z_calibrated(calib);
+        let accel_roll = libm::atan2f(ay, az) * 180.0 / core::f32::consts::PI;
+        let accel_pitch = libm::atan2f(-ax, libm::sqrtf(ay * ay + az * az)) * 180.0 / core::f32::consts::PI;
+
+        // Complementary filter: blend gyro and accel
+        self.orientation.roll = normalize_angle(ALPHA * gyro_roll + (1.0 - ALPHA) * accel_roll);
+        self.orientation.pitch = normalize_angle(ALPHA * gyro_pitch + (1.0 - ALPHA) * accel_pitch);
+        // Yaw has no accel reference — integrate gyro only
+        self.orientation.yaw = normalize_angle(self.orientation.yaw + gyro_z * dt);
 
         self.orientation
     }
