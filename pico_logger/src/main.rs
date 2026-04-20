@@ -387,6 +387,23 @@ async fn main(spawner: Spawner) {
     // Always-on telemetry: read sensors and send UART from boot, no USB command needed
     let telemetry_start = Instant::now();
 
+    // Auto-start SD logging on boot
+    let _ = SD_CMD_CHANNEL.try_send(SdCommand::CreateFile);
+    match with_timeout(Duration::from_millis(3000), SD_RESP_CHANNEL.receive()).await {
+        Ok(SdResponse::FileCreated(filename)) => {
+            log_filename = Some(filename);
+            logging_active = true;
+            sd_available = true;
+        }
+        Ok(SdResponse::NotInitialized) => {
+            sd_available = false;
+        }
+        _ => {
+            // SD init failed or timed out — continue without logging
+            sd_available = false;
+        }
+    }
+
     use embassy_time::with_timeout;
     use embassy_time::Duration;
 
